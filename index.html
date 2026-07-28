@@ -1,0 +1,129 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PixelFree — AI Image Toolkit (100% Free, Fully Automatic)</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header>
+  <div class="logo">Pixel<span>Free</span></div>
+  <div class="tag">AI batch image tools · runs in your browser · no signup · free forever</div>
+</header>
+
+<nav id="tabs">
+  <button class="tab active" data-tab="auto">⚡ Auto (all-in-one)</button>
+  <button class="tab" data-tab="convert">🔄 Convert</button>
+  <button class="tab" data-tab="bg">✂️ BG Remove</button>
+  <button class="tab" data-tab="clean">🧽 Watermark / Text</button>
+  <button class="tab" data-tab="host">🔗 File Link</button>
+</nav>
+
+<main>
+  <section class="panel">
+    <div id="drop">
+      <div class="big">📂</div>
+      <p><b>Drop images here</b> · click to choose · Ctrl+V paste</p>
+      <p class="muted">Multiple files = automatic batch processing</p>
+      <input type="file" id="fileInput" multiple accept="image/*" hidden>
+    </div>
+    <div id="thumbs"></div>
+    <button class="ghost hidden" id="clearIn">✖ Clear inputs</button>
+  </section>
+
+  <!-- AUTO -->
+  <section class="panel view" id="view-auto">
+    <h2>⚡ Auto Pipeline — sab kuch ek click me (ya bilkul zero click)</h2>
+    <p class="muted">Jo bhi steps ticked hain wo har image par order me automatically chalenge:
+      <b>watermark/text remove → background remove → format convert → share link</b>.</p>
+    <div class="opts">
+      <label class="opt"><input type="checkbox" id="optClean" checked> 🧽 Watermark &amp; text remove (AI inpaint)</label>
+      <label class="opt"><input type="checkbox" id="optBg" checked> ✂️ Background remove → transparent</label>
+      <label class="opt"><input type="checkbox" id="optLink"> 🔗 Get share links (needs internet)</label>
+      <label class="opt"><input type="checkbox" id="autoRun" checked> 🚀 Auto-start jaise hi file drop ho</label>
+    </div>
+    <button class="go big-btn" id="runAuto">▶ Run Auto Pipeline</button>
+    <div id="prog" class="hidden"><div id="barwrap"><div id="bar"></div></div><span id="progTxt"></span></div>
+  </section>
+
+  <!-- CONVERT -->
+  <section class="panel view hidden" id="view-convert">
+    <h2>Format Converter (batch)</h2>
+    <div class="row">
+      <label>Output format
+        <select id="fmt">
+          <option value="image/png">PNG</option>
+          <option value="image/jpeg">JPG</option>
+          <option value="image/webp">WEBP</option>
+        </select>
+      </label>
+      <label>Quality <input type="range" id="q" min="10" max="100" value="92"></label>
+      <label>Max width (0 = original) <input type="number" id="maxw" value="0" min="0" style="width:90px"></label>
+      <label><input type="checkbox" id="whitebg"> White bg for JPG</label>
+    </div>
+    <button class="go" id="runConvert">Convert All</button>
+  </section>
+
+  <!-- BG -->
+  <section class="panel view hidden" id="view-bg">
+    <h2>AI Background Remover → transparent PNG (batch)</h2>
+    <p class="muted">Model <code>RMBG-1.4</code> via Transformers.js, WebGPU accelerated. Pehli baar ~45&nbsp;MB download, phir browser cache — offline bhi chalega. 100% automatic, koi manual masking nahi.</p>
+    <div class="row">
+      <label><input type="checkbox" id="bgSolid"> Solid colour ke saath replace karo <input type="color" id="bgColor" value="#ffffff"></label>
+    </div>
+    <button class="go" id="runBg">Remove Backgrounds</button>
+  </section>
+
+  <!-- CLEAN -->
+  <section class="panel view hidden" id="view-clean">
+    <h2>AI Watermark / Text Remover (batch inpainting)</h2>
+    <p class="muted">Auto mode text-lines aur translucent watermarks dono detect karta hai (morphological gradient + local-variance detection) aur Telea+Navier–Stokes inpainting se bhar deta hai. Brush mode sirf tab use karo jab kuch chhoot jaye.</p>
+    <div class="row">
+      <label>Mode
+        <select id="cleanMode">
+          <option value="auto">Auto — detect &amp; remove (batch)</option>
+          <option value="brush">Brush selection (current image)</option>
+        </select>
+      </label>
+      <label>Sensitivity <input type="range" id="sens" min="1" max="10" value="6"></label>
+      <label>Brush size <input type="range" id="brush" min="5" max="80" value="28"></label>
+      <button class="ghost" id="clearMask">Clear brush</button>
+    </div>
+    <div id="canvasWrap"><canvas id="editCanvas"></canvas><canvas id="maskCanvas"></canvas></div>
+    <button class="go" id="runClean">Remove &amp; Inpaint</button>
+  </section>
+
+  <!-- HOST -->
+  <section class="panel view hidden" id="view-host">
+    <h2>File → Link (telegra.ph style)</h2>
+    <p class="muted">Anonymous free hosts try hote hain order me: tmpfiles → catbox → uguu → litterbox. Koi account nahi.
+      Agar results maujood hain to unke links banenge, warna original files ke.</p>
+    <button class="go" id="runHost">Upload &amp; Get Links</button>
+    <div id="links"></div>
+  </section>
+
+  <section class="panel hidden" id="outwrap">
+    <div class="row between">
+      <h2>Results <span id="count"></span></h2>
+      <div class="row">
+        <button class="ghost" id="copyAll">🔗 Copy all links</button>
+        <button class="ghost" id="dlZip">⬇ Download all (.zip)</button>
+      </div>
+    </div>
+    <div id="results"></div>
+  </section>
+
+  <section class="panel">
+    <h2>Log</h2>
+    <div id="log" class="log"></div>
+  </section>
+</main>
+
+<footer>Sab processing aapke browser me · koi file server par nahi jaati (jab tak aap link feature on na karo) · free forever</footer>
+
+<script src="https://docs.opencv.org/4.9.0/opencv.js" async></script>
+<script src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js"></script>
+<script type="module" src="app.js"></script>
+</body>
+</html>
