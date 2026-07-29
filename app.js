@@ -670,6 +670,8 @@ function autoMask(src, sens) {
   const kd = cv.getStructuringElement(cv.MORPH_ELLIPSE, new cv.Size(3, 3));
   cv.dilate(smallMask, smallMask, kd); kd.delete();
 
+  // edge-zone bhi yahan lagao
+  { const Z = zoneConfig(); applyZoneMask(smallMask, small.cols, small.rows, Z.mode, Z.pct); }
   const cap = +($('#cleanCap')?.value || 25) / 100;
   const frac = cv.countNonZero(smallMask) / area;
   if (frac > cap) {
@@ -964,6 +966,40 @@ function graphicWatermarkBoxes(src, strength) {
   return boxes;
 }
 
+/* ================= EDGE-ZONE RESTRICTION =================
+   User ka case: watermark/text HAMESHA left ya right kinare par hota hai,
+   chehra/body beech me. Isliye ab detection sirf edge bands me hoti hai.
+   Center zone LOCKED hai — wahan ka koi pixel kabhi nahi badlega.
+   Yahi sabse bada safety net hai: aankh center me hoti hai -> untouchable. */
+function zoneConfig() {
+  const mode = $('#zoneMode')?.value || 'both';
+  const pct  = +($('#zoneWidth')?.value || 22) / 100;
+  return { mode, pct };
+}
+
+/** box edge-zone me hai ya nahi */
+function inZone(b, W, mode, pct) {
+  if (mode === 'off') return true;
+  const band = W * pct;
+  const cx = b.x + b.w / 2;
+  const leftOK  = (mode === 'left'  || mode === 'both') && cx < band;
+  const rightOK = (mode === 'right' || mode === 'both') && cx > W - band;
+  return leftOK || rightOK;
+}
+
+/** mask ke center zone ko zero kar do (hard guarantee) */
+function applyZoneMask(mask, W, H, mode, pct) {
+  if (mode === 'off') return;
+  const band = Math.round(W * pct);
+  const allow = cv.Mat.zeros(H, W, cv.CV_8U);
+  if (mode === 'left' || mode === 'both')
+    cv.rectangle(allow, new cv.Point(0, 0), new cv.Point(band, H), new cv.Scalar(255), -1);
+  if (mode === 'right' || mode === 'both')
+    cv.rectangle(allow, new cv.Point(W - band, 0), new cv.Point(W, H), new cv.Scalar(255), -1);
+  cv.bitwise_and(mask, allow, mask);
+  allow.delete();
+}
+
 /* ---------- SKIN-AWARE MASK ----------
    Pehle skin par ka poora box reject hota tha -> haath ke paas ka text bach jaata tha.
    Ab reject nahi karte: skin par bhi text hataate hain, LEKIN sirf uske
@@ -1045,9 +1081,13 @@ async function ocrMask(src, canvas, opts) {
   }
   const prot = null;
 
+  const Z = zoneConfig();
+  let skipZone = 0;
   for (const b of boxes) {
     const ba = b.w * b.h;
     if (ba < 20 || ba > area * 0.45) { skipSize++; continue; }
+    // EDGE-ZONE GUARD: center me hai to bilkul chhodo (yahan chehra hota hai)
+    if (!inZone(b, src.cols, Z.mode, Z.pct)) { skipZone++; continue; }
     // skin overlap naapo (reject nahi karte — review me flag karte hain)
     let skinFrac = 0;
     if (skinRef) {
@@ -1072,11 +1112,14 @@ async function ocrMask(src, canvas, opts) {
                 needsReview: b.needsReview || (b.skin > 40) || b.conf < 60 });
   }
   if (skinRef) skinRef.delete();
+  // HARD GUARANTEE: center zone ke saare pixels zero
+  applyZoneMask(mask, src.cols, src.rows, Z.mode, Z.pct);
   mask.__boxes = used;
   mask.__count = used.length;
   mask.__words = used.map(u => u.text);
   mask.__ms = Math.round(performance.now() - t0);
-  mask.__skipped = { skin: skipFace, size: skipSize };
+  mask.__skipped = { skin: skipFace, size: skipSize, zone: skipZone };
+  mask.__zone = Z;
   return mask;
 }
 
@@ -1184,6 +1227,18 @@ async function cleanImage(url, sens, brushMask, opts_preview) {
     const pv = canvasOf(img.width, img.height);
     const g = pv.getContext('2d');
     g.drawImage(original, 0, 0);
+    // dim the locked center zone so user dekhe kya safe hai
+    const Z = zoneConfig();
+    if (Z.mode !== 'off') {
+      const band = Math.round(img.width * Z.pct);
+      g.fillStyle = 'rgba(0,0,0,.55)';
+      const l = (Z.mode === 'left' || Z.mode === 'both') ? band : 0;
+      const r = (Z.mode === 'right' || Z.mode === 'both') ? band : 0;
+      g.fillRect(l, 0, img.width - l - r, img.height);
+      g.strokeStyle = '#3fb950'; g.lineWidth = Math.max(2, img.width / 400);
+      if (l) g.strokeRect(0, 0, l, img.height);
+      if (r) g.strokeRect(img.width - r, 0, r, img.height);
+    }
     const im = g.getImageData(0, 0, img.width, img.height);
     const md = accum.data;
     for (let i = 0; i < img.width * img.height; i++)
@@ -1232,7 +1287,8 @@ async function scanCandidates(url) {
     const tc = canvasOf(Math.max(40, Math.min(220, w)), Math.max(28, Math.min(120, h * (Math.min(220, w) / Math.max(1, w)))));
     tc.getContext('2d').drawImage(c, x, y, w, h, 0, 0, tc.width, tc.height);
     // skin-heavy ya low-conf default OFF — user chahe to on kare
-    const risky = (b.skin || 0) > 40 || (b.conf || 0) < 60 || b.via === 'graphic';
+    // edge zone me confirmed text hai -> safe. Sirf skin-heavy ya graphic risky.
+    const risky = (b.skin || 0) > 55 || (b.conf || 0) < 45 || b.via === 'graphic';
     return { ...b, id: i, on: !risky, thumb: tc.toDataURL('image/jpeg', 0.75), risky };
   });
   src.delete(); mask.delete();
@@ -1273,7 +1329,8 @@ $('#scanBtn').onclick = async () => {
     const cs = await scanCandidates(files[current].url);
     renderReview();
     const risky = cs.filter(c => c.risky).length;
-    log(`🔍 ${cs.length} candidate mile · ${cs.filter(c=>c.on).length} auto-selected · ${risky} risky (skin/low-conf, default OFF)`,
+    const Z = zoneConfig();
+    log(`🔍 zone=${Z.mode} ${(Z.pct*100)|0}% · ${cs.length} candidate · ${cs.filter(c=>c.on).length} selected · ${risky} risky`,
         cs.length ? 'ok' : 'warn');
     log('   👉 List me check karke decide karo, phir "Remove selected" dabao');
   } catch (e) { log('✖ ' + e.message, 'err'); console.error(e); }
@@ -1324,6 +1381,64 @@ $('#removeSel').onclick = async () => {
     src.delete(); mask.delete(); rgb.delete(); dst.delete(); soft.delete();
   } catch (e) { log('✖ ' + e.message, 'err'); console.error(e); }
   finally { $$('.go').forEach(b => b.disabled = false); setProg(0); }
+};
+
+/* ---------- BATCH: sab photos ka edge-text hatao ----------
+   Pattern fix hai (left/right edge), isliye batch me safe hai.
+   Center zone har photo me locked rehta hai.                            */
+$('#batchClean').onclick = async () => {
+  if (!files.length) return alert('Pehle images add karo');
+  if (running) return;
+  running = true;
+  $$('.go').forEach(b => b.disabled = true);
+  outputs = [];
+  const Z = zoneConfig();
+  log(`🚀 Batch edge-text removal — ${files.length} file(s) · zone=${Z.mode} ${(Z.pct*100)|0}%`);
+  let totalRegions = 0, cleaned = 0, untouched = 0;
+  try {
+    await cvReady(); await initOCR();
+    for (let i = 0; i < files.length; i++) {
+      const f = files[i];
+      setProg((i + 0.5) / files.length, `${i + 1}/${files.length} · ${f.name}`);
+      const img = capCanvas(await loadImg(f.url));
+      const c = canvasOf(img.width, img.height);
+      c.getContext('2d').drawImage(img, 0, 0);
+      const src = cv.imread(c);
+
+      const mask = await ocrMask(src, c, {
+        minConf: +($('#ocrConf')?.value || 45),
+        protectFace: true,
+        level: +($('#ocrLevel')?.value || 2),
+        aggressive: false, graphic: false, reviewMode: false,
+      });
+      const found = cv.countNonZero(mask);
+      const cnt = mask.__count || 0;
+
+      if (found === 0) {
+        // kuch nahi mila -> original bilkul waisa hi rakho
+        outputs.push({ name: f.name, blob: f.file, url: f.url, untouched: true });
+        untouched++;
+        log(`  ○ ${f.name} — koi edge-text nahi, original unchanged`);
+      } else {
+        const rgb = new cv.Mat(); cv.cvtColor(src, rgb, cv.COLOR_RGBA2RGB);
+        mask.__count = cnt;
+        const dst = smartInpaint(rgb, mask, $('#cleanQ')?.value || 'fast');
+        const soft = new cv.Mat(); mask.copyTo(soft);
+        cv.GaussianBlur(soft, soft, new cv.Size(3, 3), 0);
+        const outC = composeExact(c, dst, soft);
+        const pct = (100 * (outC.__changed || 0) / (c.width * c.height)).toFixed(2);
+        pushOut(f.name.replace(/\.[^.]+$/, '') + '-clean', await toBlob(outC, 'image/png'), 'png');
+        totalRegions += cnt; cleaned++;
+        log(`  ✓ ${f.name} — ${cnt} region: ${(mask.__words||[]).slice(0,4).join(', ')} · ${pct}% pixels`, 'ok');
+        rgb.delete(); dst.delete(); soft.delete();
+      }
+      src.delete(); mask.delete();
+      showResults();
+      await sleep(0);
+    }
+    log(`🎉 Batch done — ${cleaned} cleaned (${totalRegions} regions), ${untouched} unchanged`, 'ok');
+  } catch (e) { log('✖ ' + e.message, 'err'); console.error(e); }
+  finally { $$('.go').forEach(b => b.disabled = false); setProg(0); running = false; }
 };
 
 /* ============ convert / resize ============ */
@@ -1619,7 +1734,7 @@ async function runAuto() {
 $('#runAuto').onclick = runAuto;
 
 /* live slider values */
-[['grow','%'],['shrink',''],['feather',''],['ocrConf','']].forEach(([id,suf])=>{
+[['grow','%'],['shrink',''],['feather',''],['ocrConf',''],['zoneWidth','%']].forEach(([id,suf])=>{
   const el=$('#'+id), out=$('#'+id+'V');
   if(el&&out){ const u=()=>out.textContent=el.value+suf; el.oninput=u; u(); }
 });
@@ -1757,7 +1872,7 @@ mc.addEventListener('touchmove', paint, { passive: false });
 addEventListener('mouseup', () => painting = false);
 addEventListener('touchend', () => painting = false);
 $('#clearMask').onclick = () => mc.getContext('2d').clearRect(0, 0, mc.width, mc.height);
-function brushMaskFor(src) {
+function brushMaskFor(src) {   // brush par zone lagu nahi hota (manual = full control)
   const m = mc.getContext('2d').getImageData(0, 0, mc.width, mc.height);
   const a = new cv.Mat(mc.height, mc.width, cv.CV_8U);
   for (let i = 0; i < mc.width * mc.height; i++) a.data[i] = m.data[4 * i + 3] > 10 ? 255 : 0;
@@ -1788,5 +1903,4 @@ addEventListener('beforeunload', () => { try { ocrWorker?.terminate(); } catch(e
 /* warm up in background so first real run is fast */
 addEventListener('load', () => { cvReady().then(() => log('✅ OpenCV engine ready', 'ok')).catch(() => {}); });
 log('👋 Ready. Images drop karo — sab kuch automatically ho jayega.');
-log('🏷 build v9.0-review · memory-safe · MAX_PIXELS=' + (MAX_PIXELS/1e6).toFixed(0) + 'MP · deviceMemory=' + (navigator.deviceMemory||'?') + 'GB', 'ok');
-
+log('🏷 build v10.0-zone · memory-safe · MAX_PIXELS=' + (MAX_PIXELS/1e6).toFixed(0) + 'MP · deviceMemory=' + (navigator.deviceMemory||'?') + 'GB', 'ok');
