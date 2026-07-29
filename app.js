@@ -1821,6 +1821,122 @@ class AlphaMemory {
   }
 }
 
+/* ================= FAST DECODER (WebCodecs) =================
+   Seeking har frame par ~120ms leta hai (decoder flush). WebCodecs
+   VideoDecoder poori stream sequentially decode karta hai — ~5-10ms/frame.
+   Frames ek bounded queue me aate hain, AI unhe consume karta hai.       */
+async function makeFastDecoder(file, fps, maxFrames, onFrame) {
+  if (typeof VideoDecoder === 'undefined' || !window.MP4Box) return null;
+  const mp4 = MP4Box.createFile();
+  let decoder = null, track = null, pushed = 0, stopped = false;
+  const wantStep = 1e6 / fps;                  // microseconds between wanted frames
+  let nextWant = 0;
+
+  const ready = new Promise((resolve, reject) => {
+    mp4.onError = e => reject(new Error('mp4box: ' + e));
+    mp4.onReady = info => {
+      track = info.videoTracks[0];
+      if (!track) return reject(new Error('koi video track nahi'));
+      const desc = getAvcDescription(mp4, track);
+      decoder = new VideoDecoder({
+        output: async frame => {
+          if (stopped) { frame.close(); return; }
+          const ts = frame.timestamp;
+          if (ts + 1 >= nextWant && pushed < maxFrames) {
+            nextWant = ts + wantStep * 0.98;
+            pushed++;
+            await onFrame(frame, pushed - 1);     // consumer frame.close() karega
+          } else frame.close();
+        },
+        error: e => console.error('decoder', e),
+      });
+      decoder.configure({
+        codec: track.codec,
+        codedWidth: track.track_width,
+        codedHeight: track.track_height,
+        description: desc,
+        hardwareAcceleration: 'prefer-hardware',
+        optimizeForLatency: false,
+      });
+      mp4.setExtractionOptions(track.id, null, { nbSamples: 30 });
+      mp4.start();
+      resolve();
+    };
+    mp4.onSamples = (id, user, samples) => {
+      for (const sm of samples) {
+        if (stopped) return;
+        decoder.decode(new EncodedVideoChunk({
+          type: sm.is_sync ? 'key' : 'delta',
+          timestamp: (sm.cts * 1e6) / sm.timescale,
+          duration: (sm.duration * 1e6) / sm.timescale,
+          data: sm.data,
+        }));
+      }
+    };
+  });
+
+  const buf = await file.arrayBuffer();
+  buf.fileStart = 0;
+  mp4.appendBuffer(buf);
+  mp4.flush();
+  await ready;
+  return {
+    async drain() { if (decoder) await decoder.flush(); },
+    stop() { stopped = true; try { decoder?.close(); } catch (e) {} },
+    get pushed() { return pushed; },
+  };
+}
+
+function getAvcDescription(mp4, track) {
+  const trak = mp4.getTrackById(track.id);
+  for (const entry of trak.mdia.minf.stbl.stsd.entries) {
+    const box = entry.avcC || entry.hvcC || entry.vpcC || entry.av1C;
+    if (box) {
+      const stream = new DataStream(undefined, 0, DataStream.BIG_ENDIAN);
+      box.write(stream);
+      return new Uint8Array(stream.buffer, 8);   // header skip
+    }
+  }
+  return undefined;
+}
+
+/* ================= AI WORKER POOL =================
+   Ek session par inference serial hoti hai. Do sessions banake
+   alternate frames bhejte hain -> GPU/CPU overlap, ~1.6-1.9x.        */
+let bgPool = [], poolIdx = 0;
+async function initBgPool(n) {
+  if (bgPool.length >= n) return bgPool;
+  await initBg();
+  bgPool = [model];
+  for (let i = 1; i < n; i++) {
+    try {
+      const m = await AutoModel.from_pretrained('briaai/RMBG-1.4', {
+        config: { model_type: 'custom' },
+        device: navigator.gpu ? 'webgpu' : 'wasm', dtype: 'fp32',
+      });
+      bgPool.push(m);
+      log(`   + AI session ${i + 1} ready`);
+    } catch (e) { log(`   ⚠ session ${i + 1} nahi bana — ${bgPool.length} se chalega`, 'warn'); break; }
+  }
+  return bgPool;
+}
+
+/** pool se alpha nikalo (round-robin) */
+async function poolAlpha(canvas, W, H, outBuf) {
+  const size = RMBG_SIZE;
+  const data = canvasToTensor(canvas, size);
+  const input = new Tensor('float32', data, [1, 3, size, size]);
+  const m = bgPool.length ? bgPool[poolIdx++ % bgPool.length] : model;
+  const { output } = await m({ input });
+  const od = output.data, n = size * size;
+  const m8 = new Uint8ClampedArray(n);
+  let mn = 1e9, mx = -1e9;
+  for (let i = 0; i < n; i++) { const v = od[i]; if (v < mn) mn = v; if (v > mx) mx = v; }
+  const rng = (mx - mn) || 1;
+  for (let i = 0; i < n; i++) m8[i] = ((od[i] - mn) / rng) * 255;
+  return upscaleMask(m8, size, W, H, outBuf);
+}
+
 /* ================= EXACT-TIMING ENCODER =================
    BUG: MediaRecorder wall-clock time record karta hai. 6s video agar
    process hone me 3 min lagi to output bhi 3 min ka banta hai (aur
@@ -1898,6 +2014,123 @@ async function makeExactEncoder(W, H, fps, alpha, bitrate) {
     get frames() { return n; },
     get alphaOK() { return alphaOK; },
   };
+}
+
+/* ================= TURBO PIPELINE =================
+   Serial: seek(120) -> AI(155) -> compose(20) -> encode(25) = 320ms/frame
+   Pipeline: stages overlap, bottleneck sirf sabse slow stage.
+   + WebCodecs decode (120 -> 8ms) + 2 AI sessions (155 -> ~85ms)
+   Net: ~320ms -> ~90ms per frame = 3.5x                                */
+async function runTurboVideo(opts) {
+  const { v, W, H, fps, total, dur, bgMode, bgCol, every, regionEvery,
+          smooth, personMode, cm, enc, out, ox, grab, gx, tmp, tcx, px,
+          rescueSkin, holeFill, memDepth, t0 } = opts;
+
+  const memDecay = memDepth <= 1 ? 0 : 1 - (1 / memDepth);
+  const mem = memDepth > 1 ? new AlphaMemory(W, H, memDepth) : null;
+
+  let lastRaw = null, alphaBuf = null, personRegion = null, prevAlpha = null;
+  let aiFrames = 0, written = 0;
+
+  // bounded queue: decoder aage bhaage par memory na phate
+  const QMAX = 4;
+  const queue = [];
+  let qResolve = null, decodeDone = false;
+
+  const pushFrame = async (bitmap, idx) => {
+    while (queue.length >= QMAX) await new Promise(r => setTimeout(r, 5));
+    queue.push({ bitmap, idx });
+    if (qResolve) { const r = qResolve; qResolve = null; r(); }
+  };
+  const popFrame = async () => {
+    while (!queue.length && !decodeDone) await new Promise(r => { qResolve = r; setTimeout(r, 200); });
+    return queue.shift() || null;
+  };
+
+  // ---- decoder task ----
+  const dec = await makeFastDecoder(vidFile, fps, total, async (frame, idx) => {
+    const bmp = await createImageBitmap(frame);
+    frame.close();
+    await pushFrame(bmp, idx);
+  });
+  if (!dec) return null;                        // caller fallback karega
+  log('⚡ WebCodecs decoder active (seek se ~15x fast)', 'ok');
+
+  const decTask = (async () => {
+    try { await dec.drain(); } catch (e) { log('⚠ decode: ' + e.message, 'warn'); }
+    decodeDone = true;
+    if (qResolve) { const r = qResolve; qResolve = null; r(); }
+  })();
+
+  // ---- consumer: AI + compose + encode ----
+  let encPromise = Promise.resolve();
+  while (written < total) {
+    const item = await popFrame();
+    if (!item) break;
+    const { bitmap, idx } = item;
+
+    gx.clearRect(0, 0, W, H);
+    gx.drawImage(bitmap, 0, 0, W, H);
+    bitmap.close();
+
+    if (idx % every === 0 || !lastRaw) {
+      aiFrames++;
+      lastRaw = await poolAlpha(grab, W, H, alphaBuf);
+      alphaBuf = lastRaw;
+      if (personMode && (idx % regionEvery === 0 || !personRegion)) {
+        const pr = await fastPersonRegion(grab, W, H, {
+          keepAccessories: $('#keepAcc').checked, keepBag: $('#keepBag').checked });
+        if (pr) personRegion = await dilateRegion(pr, W, H, +($('#grow')?.value || 6));
+      }
+      if (personMode && personRegion) {
+        const skin = rescueSkin ? frameSkinMask(grab, W, H) : null;
+        for (let i = 0; i < W * H; i++) {
+          if (personRegion[i] >= 128) continue;
+          const al = lastRaw[i];
+          if (al < 30) { lastRaw[i] = 0; continue; }
+          if (skin && skin[i]) continue;
+          if (al > 200) { lastRaw[i] = al * 0.85; continue; }
+          lastRaw[i] = al * 0.25;
+        }
+      }
+      if (holeFill) { try { lastRaw = fillHoles(lastRaw, W, H, 7); } catch (e) {} }
+    }
+
+    const remembered = mem ? mem.push(lastRaw, memDecay) : lastRaw;
+    const curAlpha = blendAlpha(prevAlpha, remembered, W, H, smooth);
+    prevAlpha = curAlpha;
+
+    ox.clearRect(0, 0, W, H);
+    if (bgMode === 'green') { ox.fillStyle = '#00b140'; ox.fillRect(0, 0, W, H); }
+    else if (bgMode === 'color') { ox.fillStyle = bgCol; ox.fillRect(0, 0, W, H); }
+    else if (bgMode === 'blur') { ox.save(); ox.filter = `blur(${Math.max(8, W/60)}px)`; ox.drawImage(grab, 0, 0); ox.restore(); }
+    const fr = gx.getImageData(0, 0, W, H);
+    for (let i = 0; i < W * H; i++) fr.data[4 * i + 3] = curAlpha[i];
+    tcx.clearRect(0, 0, W, H);
+    tcx.putImageData(fr, 0, 0);
+    ox.drawImage(tmp, 0, 0);
+
+    // encode overlap: pichla encode wait mat karo
+    await encPromise;
+    encPromise = enc.add(out, written === 0);
+    written++;
+
+    if ((written & 3) === 0) {
+      px.clearRect(0, 0, W, H); px.drawImage(out, 0, 0);
+      const p = written / total;
+      const el = (performance.now() - t0) / 1000;
+      const rate = (written / Math.max(0.001, el)).toFixed(1);
+      const eta = p > 0.03 ? Math.round(el / p - el) : 0;
+      setProg(p, `frame ${written}/${total} · ${rate} fps`);
+      jobStep(written, `⚡turbo · ${written}/${total} · ${rate} fps · ${aiFrames} AI · out ${(written/fps).toFixed(1)}s · ETA ${eta}s`);
+      await sleep(0);
+    }
+    if (vidAbort) break;
+  }
+  await encPromise;
+  dec.stop();
+  await decTask;
+  return { written, aiFrames };
 }
 
 $('#runVideo').onclick = async () => {
@@ -1985,7 +2218,10 @@ $('#runVideo').onclick = async () => {
     v.pause(); v.muted = true;
     jobStart(`🎬 Video background remove — ${vidFile.name}`, total);
     let prevAlpha = null, lastRaw = null, alphaBuf = null, personRegion = null;
-    let aiFrames = 0;
+    let aiFrames = 0, turboDone = false;
+    const nSessions = Math.max(1, Math.min(3, +($('#vidWorkers')?.value || 2)));
+    if (nSessions > 1) { log(`🧩 ${nSessions} AI sessions bana rahe hain…`); await initBgPool(nSessions); }
+    else bgPool = [model];
     const rescueSkin = $('#vidSkinRescue')?.checked ?? true;
     const holeFill   = $('#vidHoleFill')?.checked ?? true;
     const holeK      = 7;
@@ -1997,6 +2233,28 @@ $('#runVideo').onclick = async () => {
     log(`⚙ AI 1024px · mask har ${every}f · person-check har ${regionEvery}f · ` +
         `skin-rescue ${rescueSkin?'ON':'off'} · hole-fill ${holeFill?'ON':'off'} · memory ${memDepth}f`);
     const t0 = performance.now();
+
+    // ---------- TURBO PATH: WebCodecs decode + pipeline ----------
+    const wantTurbo = ($('#vidTurbo')?.checked ?? true) && enc &&
+                      typeof VideoDecoder !== 'undefined' && window.MP4Box &&
+                      /mp4|m4v|mov/i.test(vidFile.name + ' ' + vidFile.type);
+    if (wantTurbo) {
+      try {
+        const r = await runTurboVideo({
+          v, W, H, fps, total, dur, bgMode, bgCol, every, regionEvery, smooth,
+          personMode, cm, enc, out, ox, grab, gx, tmp, tcx, px,
+          rescueSkin, holeFill, memDepth, t0,
+        });
+        if (r && r.written >= total * 0.9) {
+          turboDone = true;
+          log(`⚡ turbo: ${r.written}/${total} frames · ${r.aiFrames} AI calls`, 'ok');
+        } else if (r) {
+          log(`⚠ turbo ne ${r.written}/${total} diye — normal mode se poora karte hain`, 'warn');
+        }
+      } catch (e) {
+        log(`⚠ turbo fail (${e.message}) — normal mode`, 'warn');
+      }
+    }
 
     // playback mode: seeking se 5-10x fast
     const usePump = ($('#vidSeek')?.value || 'seek') === 'play' && 'requestVideoFrameCallback' in v;
@@ -2011,7 +2269,7 @@ $('#runVideo').onclick = async () => {
       log('🐢 seek mode (rVFC unavailable ya manually chuna gaya)');
     }
 
-    for (let idx = 0; idx < total && !vidAbort; idx++) {
+    for (let idx = 0; !turboDone && idx < total && !vidAbort; idx++) {
       const wantT = Math.min(idx / fps, Math.max(0, dur - 0.001));
       if (pump) {
         const t = await pump.next();
@@ -2444,4 +2702,4 @@ addEventListener('beforeunload', () => { try { ocrWorker?.terminate(); } catch(e
 /* warm up in background so first real run is fast */
 addEventListener('load', () => { cvReady().then(() => log('✅ OpenCV engine ready', 'ok')).catch(() => {}); });
 log('👋 Ready. Images drop karo — sab kuch automatically ho jayega.');
-log('🏷 build v16.0-facesafe · memory-safe · MAX_PIXELS=' + (MAX_PIXELS/1e6).toFixed(0) + 'MP · deviceMemory=' + (navigator.deviceMemory||'?') + 'GB', 'ok');
+log('🏷 build v17.0-turbo · memory-safe · MAX_PIXELS=' + (MAX_PIXELS/1e6).toFixed(0) + 'MP · deviceMemory=' + (navigator.deviceMemory||'?') + 'GB', 'ok');
