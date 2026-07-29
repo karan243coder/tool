@@ -1,5 +1,5 @@
 /* PixelFree — fully automatic AI image toolkit. Everything runs in the browser. */
-import { env, AutoModel, AutoProcessor, RawImage, pipeline }
+import { env, AutoModel, AutoProcessor, RawImage, pipeline, Tensor }
   from 'https://cdn.jsdelivr.net/npm/@huggingface/transformers@3.0.2';
 
 env.allowLocalModels = false;
@@ -1454,152 +1454,383 @@ async function convertCanvas(srcCanvasOrImg, fmt, q, maxw, whitebg) {
 const extOf = f => ({ 'image/png': 'png', 'image/jpeg': 'jpg', 'image/webp': 'webp' }[f] || 'png');
 
 
-/* ============ VIDEO BACKGROUND REMOVAL ============
-   Har frame par person cutout -> WebM (alpha) ya solid/greenscreen background.
-   MediaRecorder + canvas stream. Fully automatic.                          */
-let vidFile = null, vidAbort = false;
+/* ============ FAST VIDEO PATH (v12) ============
+   Slow kyun tha:
+     seek -> canvas -> toBlob(JPEG) -> blob URL -> Image decode -> RawImage
+     -> processor resize 1024 -> model -> resize back.  Har frame par 5 round-trip.
+   Ab: canvas se SEEDHA tensor banate hain (no encode/decode), model ko
+   chhoti resolution deते hain, aur mask ko GPU-free bilinear se upscale karte hain. */
 
-$('#vidInput').onchange = e => {
-  const f = e.target.files[0]; if (!f) return;
+let vidTensorBuf = null, vidSmall = null, vidSmallCtx = null;
+
+/** canvas -> normalized CHW Float32 tensor, bina JPEG round-trip ke */
+function canvasToTensor(canvas, size) {
+  if (!vidSmall || vidSmall.width !== size) {
+    vidSmall = canvasOf(size, size);
+    vidSmallCtx = vidSmall.getContext('2d', { willReadFrequently: true });
+    vidSmallCtx.imageSmoothingQuality = 'medium';
+  }
+  vidSmallCtx.drawImage(canvas, 0, 0, size, size);
+  const d = vidSmallCtx.getImageData(0, 0, size, size).data;
+  const n = size * size;
+  if (!vidTensorBuf || vidTensorBuf.length !== 3 * n) vidTensorBuf = new Float32Array(3 * n);
+  const t = vidTensorBuf;
+  // RMBG normalize: (x/255 - 0.5) / 1.0   -> CHW
+  for (let i = 0; i < n; i++) {
+    const o = 4 * i;
+    t[i]         = d[o]     / 255 - 0.5;
+    t[n + i]     = d[o + 1] / 255 - 0.5;
+    t[2 * n + i] = d[o + 2] / 255 - 0.5;
+  }
+  return t;
+}
+
+/** bilinear upscale mask (size x size) -> (W x H) */
+function upscaleMask(src, size, W, H, out) {
+  const dst = out && out.length === W * H ? out : new Uint8ClampedArray(W * H);
+  const sx = size / W, sy = size / H;
+  for (let y = 0; y < H; y++) {
+    const fy = Math.min(size - 1.001, y * sy);
+    const y0 = fy | 0, wy = fy - y0, y1 = y0 + 1 < size ? y0 + 1 : y0;
+    const r0 = y0 * size, r1 = y1 * size, orow = y * W;
+    for (let x = 0; x < W; x++) {
+      const fx = Math.min(size - 1.001, x * sx);
+      const x0 = fx | 0, wx = fx - x0, x1 = x0 + 1 < size ? x0 + 1 : x0;
+      const a = src[r0 + x0], b = src[r0 + x1], c = src[r1 + x0], e = src[r1 + x1];
+      const top = a + (b - a) * wx, bot = c + (e - c) * wx;
+      dst[orow + x] = top + (bot - top) * wy;
+    }
+  }
+  return dst;
+}
+
+/** ek frame ka alpha — direct tensor, koi blob/encode nahi */
+async function fastFrameAlpha(grabCanvas, W, H, size, outBuf) {
+  const data = canvasToTensor(grabCanvas, size);
+  const input = new Tensor('float32', data, [1, 3, size, size]);
+  const { output } = await model({ input });
+  const od = output.data;                       // Float32 [1,1,size,size]
+  const n = size * size;
+  const m8 = new Uint8ClampedArray(n);
+  // min-max normalize (RMBG output 0..1 range me hota hai par safety ke liye)
+  let mn = 1e9, mx = -1e9;
+  for (let i = 0; i < n; i++) { const v = od[i]; if (v < mn) mn = v; if (v > mx) mx = v; }
+  const rng = (mx - mn) || 1;
+  for (let i = 0; i < n; i++) m8[i] = ((od[i] - mn) / rng) * 255;
+  return upscaleMask(m8, size, W, H, outBuf);
+}
+
+/** person region ko chhote size par nikaalo (har N frame par) */
+async function fastPersonRegion(grabCanvas, W, H, opts) {
+  const blob = await new Promise(r => grabCanvas.toBlob(r, 'image/jpeg', 0.85));
+  const url = URL.createObjectURL(blob);
+  try {
+    const { alpha, hit } = await personAlpha(url, W, H, opts);
+    return hit ? alpha : null;
+  } finally { URL.revokeObjectURL(url); }
+}
+
+/* ============ VIDEO BACKGROUND REMOVAL (v11 — rewritten) ============
+   Fixes:
+   • upload bug: input drop-zone ke andar tha -> click recursion, picker nahi khulta tha.
+     Ab input body me hai aur handler explicit hai.
+   • frame-accurate seek with requestVideoFrameCallback (jahan available)
+   • temporal smoothing: mask frames ke beech blend -> flicker khatam
+   • edge refine per frame                                                    */
+let vidFile = null, vidAbort = false, vidURL = null;
+
+function vidLoad(f) {
+  if (!f) return;
+  if (!f.type.startsWith('video/') && !/\.(mp4|webm|mov|mkv|avi|m4v)$/i.test(f.name)) {
+    alert('Ye video file nahi lag rahi: ' + f.name); return;
+  }
   vidFile = f;
+  if (vidURL) URL.revokeObjectURL(vidURL);
+  vidURL = URL.createObjectURL(f);
   const v = $('#srcVideo');
-  v.src = URL.createObjectURL(f);
+  v.src = vidURL;
+  v.load();
   $('#vidStage').classList.remove('hidden');
+  $('#vidOut').innerHTML = '';
   v.onloadedmetadata = () => {
-    log(`🎬 ${f.name} · ${v.videoWidth}x${v.videoHeight} · ${v.duration.toFixed(1)}s`);
-    $('#vidMeta').textContent = `${v.videoWidth}×${v.videoHeight} · ${v.duration.toFixed(1)}s`;
+    const d = isFinite(v.duration) ? v.duration.toFixed(1) + 's' : '?';
+    $('#vidMeta').textContent = `${v.videoWidth}×${v.videoHeight} · ${d} · ${(f.size/1048576).toFixed(1)} MB`;
+    log(`🎬 loaded: ${f.name} · ${v.videoWidth}x${v.videoHeight} · ${d}`, 'ok');
   };
-};
-$('#vidDrop').onclick = () => $('#vidInput').click();
-['dragenter','dragover'].forEach(e=>$('#vidDrop').addEventListener(e,ev=>{ev.preventDefault();$('#vidDrop').classList.add('hot');}));
-['dragleave','drop'].forEach(e=>$('#vidDrop').addEventListener(e,ev=>{ev.preventDefault();$('#vidDrop').classList.remove('hot');}));
-$('#vidDrop').addEventListener('drop', ev => {
-  const f=[...ev.dataTransfer.files].find(x=>x.type.startsWith('video/'));
-  if(f){ $('#vidInput').files=ev.dataTransfer.files; $('#vidInput').onchange({target:{files:[f]}}); }
+  v.onerror = () => {
+    log(`✖ ye format browser me nahi chalta (${f.name}). MP4/H.264 ya WebM try karo.`, 'err');
+    alert('Video decode nahi hui.\nChrome me MP4 (H.264) ya WebM best chalte hain.\nMOV/MKV kabhi-kabhi support nahi hote.');
+  };
+}
+
+// picker: input ko drop-zone se BAHAR rakha gaya hai (recursion fix)
+$('#vidPick').onclick = (e) => { e.preventDefault(); e.stopPropagation(); $('#vidInput').click(); };
+$('#vidInput').onchange = e => { vidLoad(e.target.files[0]); e.target.value = ''; };
+$('#vidDrop').addEventListener('click', e => {
+  if (e.target.closest('#vidPick')) return;
+  $('#vidInput').click();
 });
+['dragenter','dragover'].forEach(ev => $('#vidDrop').addEventListener(ev, e => {
+  e.preventDefault(); e.stopPropagation(); $('#vidDrop').classList.add('hot');
+}));
+['dragleave','dragend'].forEach(ev => $('#vidDrop').addEventListener(ev, e => {
+  e.preventDefault(); $('#vidDrop').classList.remove('hot');
+}));
+$('#vidDrop').addEventListener('drop', e => {
+  e.preventDefault(); e.stopPropagation();
+  $('#vidDrop').classList.remove('hot');
+  const f = [...(e.dataTransfer?.files || [])][0];
+  vidLoad(f);
+});
+// page-wide accidental drop guard
+['dragover','drop'].forEach(ev => document.addEventListener(ev, e => {
+  if (!e.target.closest('#vidDrop') && !e.target.closest('#drop')) e.preventDefault();
+}));
 $('#vidStop').onclick = () => { vidAbort = true; log('⏹ stop requested', 'warn'); };
 
+/* presets */
+const VID_PRESETS = {
+  turbo:     { vidQual:'320', vidW:'480', vidFps:'12', vidSkip:'2', vidRegion:'15', vidRate:'3', vidSeek:'play', vidSmooth:'70' },
+  balanced:  { vidQual:'512', vidW:'720', vidFps:'15', vidSkip:'1', vidRegion:'8',  vidRate:'2', vidSeek:'play', vidSmooth:'60' },
+  quality:   { vidQual:'768', vidW:'720', vidFps:'24', vidSkip:'1', vidRegion:'4',  vidRate:'1', vidSeek:'seek', vidSmooth:'50' },
+};
+document.querySelectorAll('.preset').forEach(b => b.onclick = () => {
+  const p = VID_PRESETS[b.dataset.p];
+  for (const [k, val] of Object.entries(p)) {
+    const el = $('#' + k); if (!el) continue;
+    el.value = val; el.dispatchEvent(new Event('input'));
+  }
+  log(`⚙ preset: ${b.dataset.p}`, 'ok');
+});
+
 function pickMime(alpha) {
-  const opts = alpha
+  const list = alpha
     ? ['video/webm;codecs=vp9', 'video/webm;codecs=vp8', 'video/webm']
-    : ['video/webm;codecs=vp9', 'video/webm;codecs=vp8', 'video/mp4;codecs=h264', 'video/webm'];
-  return opts.find(m => MediaRecorder.isTypeSupported(m)) || '';
+    : ['video/webm;codecs=vp9', 'video/webm;codecs=vp8', 'video/mp4;codecs=avc1.42E01E', 'video/webm'];
+  return list.find(m => MediaRecorder.isTypeSupported(m)) || '';
+}
+
+/* Seeking har frame par bahut slow hai (decoder flush karta hai).
+   Agar rVFC available ho to video ko PLAY karke frames pump karte hain —
+   decoder sequential decode karta hai = 5-10x fast.                      */
+function makeFramePump(v, fps) {
+  const has = 'requestVideoFrameCallback' in v;
+  if (!has) return null;
+  let queue = [], waiting = null, lastT = -1;
+  const step = 1 / fps;
+  const onFrame = (now, meta) => {
+    const t = meta.mediaTime;
+    if (t - lastT >= step * 0.85) {          // dedupe: har fps-slot ka ek frame
+      lastT = t;
+      if (waiting) { const w = waiting; waiting = null; w(t); }
+      else queue.push(t);
+    }
+    if (!v.paused && !v.ended) v.requestVideoFrameCallback(onFrame);
+  };
+  v.requestVideoFrameCallback(onFrame);
+  return {
+    next: () => new Promise(res => {
+      if (queue.length) return res(queue.shift());
+      if (v.ended) return res(null);
+      waiting = res;
+      setTimeout(() => { if (waiting === res) { waiting = null; res(v.ended ? null : v.currentTime); } }, 900);
+    }),
+    stop: () => { queue = []; waiting = null; },
+  };
+}
+
+/** precise seek: rVFC use karo jahan mile, warna seeked event */
+function seekTo(v, t) {
+  return new Promise(res => {
+    let done = false;
+    const finish = () => { if (!done) { done = true; res(); } };
+    if ('requestVideoFrameCallback' in v) {
+      v.requestVideoFrameCallback(() => finish());
+    }
+    v.onseeked = () => setTimeout(finish, 0);
+    v.currentTime = t;
+    setTimeout(finish, 400);                    // safety timeout
+  });
+}
+
+/** temporal blend: pichle mask ke saath mix -> flicker/jitter kam */
+function blendAlpha(prev, cur, w, h, factor) {
+  if (!prev) return cur;
+  const out = new Uint8ClampedArray(w * h);
+  const f = factor, g = 1 - f;
+  for (let i = 0; i < w * h; i++) out[i] = cur[i] * f + prev[i] * g;
+  return out;
 }
 
 $('#runVideo').onclick = async () => {
   if (!vidFile) return alert('Pehle video select karo');
   if (running) return;
   running = true; vidAbort = false;
-  $$('.go').forEach(b => b.disabled = true); $('#vidStop').disabled = false;
+  $$('.go').forEach(b => b.disabled = true);
+  $('#vidStop').disabled = false;
 
   const v = $('#srcVideo');
-  const bgMode = $('#vidBg').value;           // alpha | green | color | blur
+  const bgMode = $('#vidBg').value;
   const bgCol  = $('#vidColor').value;
   const fps    = +$('#vidFps').value;
   const maxW   = +$('#vidW').value;
-  const every  = +$('#vidSkip').value;        // mask reuse (speed)
+  const every  = +$('#vidSkip').value;
+  const smooth = +($('#vidSmooth')?.value || 60) / 100;
 
   try {
+    if (!v.videoWidth) { await new Promise(r => { v.onloadeddata = r; setTimeout(r, 3000); }); }
+    if (!v.videoWidth) throw new Error('video decode nahi hui — MP4/WebM try karo');
+
     await cvReady();
-    if ($('#personOnly').checked) {
-      const cm = $('#cutMode')?.value || 'smart';
-      if (cm !== 'detail') await initParser();
-      if (cm !== 'semantic') await initBg();
-    } else await initBg();
+    const personMode = $('#personOnly').checked;
+    const cm = $('#cutMode')?.value || 'smart';
+    if (personMode) { if (cm !== 'detail') await initParser(); if (cm !== 'semantic') await initBg(); }
+    else await initBg();
 
     const scale = maxW ? Math.min(1, maxW / v.videoWidth) : 1;
-    const W = Math.round(v.videoWidth * scale) & ~1;
-    const H = Math.round(v.videoHeight * scale) & ~1;
-    const out = canvasOf(W, H), ox = out.getContext('2d');
-    const grab = canvasOf(W, H), gx = grab.getContext('2d');
-    $('#vidPreview').width = W; $('#vidPreview').height = H;
-    const px = $('#vidPreview').getContext('2d');
+    const W = (Math.round(v.videoWidth * scale) >> 1) << 1;
+    const H = (Math.round(v.videoHeight * scale) >> 1) << 1;
+
+    const out  = canvasOf(W, H), ox = out.getContext('2d', { alpha: true });
+    const grab = canvasOf(W, H), gx = grab.getContext('2d', { willReadFrequently: true });
+    const tmp  = canvasOf(W, H), tcx = tmp.getContext('2d', { willReadFrequently: true });
+    const pvC = $('#vidPreview'); pvC.width = W; pvC.height = H;
+    const px = pvC.getContext('2d');
 
     const alpha = bgMode === 'alpha';
     const mime = pickMime(alpha);
-    log(`🎬 encoding ${W}x${H} @${fps}fps · ${mime || 'default'} · bg=${bgMode}`);
+    if (!mime) throw new Error('MediaRecorder support nahi — Chrome/Edge use karo');
 
-    const stream = out.captureStream(fps);
-    // keep original audio if user wants
+    const dur = isFinite(v.duration) ? v.duration : 0;
+    if (!dur) throw new Error('video duration unknown');
+    const total = Math.max(1, Math.floor(dur * fps));
+    log(`🎬 ${W}x${H} @${fps}fps · ${total} frames · ${mime.split(';')[0]} · bg=${bgMode}`);
+
+    const stream = out.captureStream(0);          // manual frame push
+    const track = stream.getVideoTracks()[0];
+    const canManual = typeof track.requestFrame === 'function';
+
     let audioTrack = null;
-    if ($('#vidAudio').checked && v.captureStream) {
-      try { const s = v.captureStream(); audioTrack = s.getAudioTracks()[0]; if (audioTrack) stream.addTrack(audioTrack); } catch (e) {}
+    if ($('#vidAudio').checked) {
+      try {
+        const as = v.captureStream ? v.captureStream() : v.mozCaptureStream?.();
+        audioTrack = as?.getAudioTracks?.()[0];
+        if (audioTrack) { stream.addTrack(audioTrack); log('🔊 audio track added'); }
+      } catch (e) { log('⚠ audio capture fail — video-only', 'warn'); }
     }
+
     const chunks = [];
-    const rec = new MediaRecorder(stream, { mimeType: mime, videoBitsPerSecond: +$('#vidBr').value * 1e6 });
+    const rec = new MediaRecorder(stream, {
+      mimeType: mime,
+      videoBitsPerSecond: +$('#vidBr').value * 1e6,
+    });
     rec.ondataavailable = e => e.data.size && chunks.push(e.data);
-    const done = new Promise(r => rec.onstop = r);
+    const stopped = new Promise(r => rec.onstop = r);
     rec.start();
 
-    const dur = v.duration;
-    const step = 1 / fps;
-    let lastAlpha = null, idx = 0, t0 = performance.now();
+    v.pause(); v.muted = true;
+    let prevAlpha = null, lastRaw = null, alphaBuf = null, personRegion = null;
+    const modelSize = +($('#vidQual')?.value || 512);      // 320 / 512 / 768 / 1024
+    const regionEvery = Math.max(1, +($('#vidRegion')?.value || 8));
+    log(`⚙ model input ${modelSize}px · person-region har ${regionEvery} frame`);
+    const t0 = performance.now();
 
-    v.pause(); v.muted = !$('#vidAudio').checked;
+    // playback mode: seeking se 5-10x fast
+    const usePump = ($('#vidSeek')?.value || 'play') === 'play' && 'requestVideoFrameCallback' in v;
+    let pump = null;
+    if (usePump) {
+      v.currentTime = 0;
+      v.playbackRate = Math.min(4, Math.max(1, +($('#vidRate')?.value || 2)));
+      await v.play().catch(() => {});
+      pump = makeFramePump(v, fps);
+      log(`⚡ playback capture mode · ${v.playbackRate}x speed (seek mode se ~5x fast)`);
+    } else {
+      log('🐢 seek mode (rVFC unavailable ya manually chuna gaya)');
+    }
 
-    for (let t = 0; t < dur && !vidAbort; t += step, idx++) {
-      // seek precisely
-      await new Promise(res => { v.onseeked = res; v.currentTime = Math.min(t, dur - 0.001); });
+    for (let idx = 0; idx < total && !vidAbort; idx++) {
+      if (pump) {
+        const t = await pump.next();
+        if (t === null) { log(`   video khatam ${idx} frames par`); break; }
+      } else {
+        await seekTo(v, Math.min(idx / fps, Math.max(0, dur - 0.01)));
+      }
+      gx.clearRect(0, 0, W, H);
       gx.drawImage(v, 0, 0, W, H);
 
-      // compute mask (reuse every N frames for speed)
-      if (idx % every === 0 || !lastAlpha) {
-        const url = grab.toDataURL('image/jpeg', 0.9);
-        if ($('#personOnly').checked) {
-          const cc = await personCutout(url, {
-            bgColor: null,
-            keepAccessories: $('#keepAcc').checked, keepBag: $('#keepBag').checked,
-            feather: +$('#feather').value, grow: +($('#grow')?.value || 4),
-            shrink: +($('#shrink')?.value || 0), mode: $('#cutMode')?.value || 'smart' });
-          const dd = cc.canvas.getContext('2d').getImageData(0, 0, W, H);
-          const a2 = new Uint8ClampedArray(W * H);
-          for (let i = 0; i < W * H; i++) a2[i] = dd.data[4 * i + 3];
-          lastAlpha = a2;
-        } else {
-          const c = await removeBg(url, null);
-          const d = c.getContext('2d').getImageData(0, 0, W, H);
-          const a = new Uint8ClampedArray(W * H);
-          for (let i = 0; i < W * H; i++) a[i] = d.data[4 * i + 3];
-          lastAlpha = a;
+      if (idx % every === 0 || !lastRaw) {
+        // FAST PATH: canvas -> tensor seedha (no JPEG encode/decode round-trip)
+        lastRaw = await fastFrameAlpha(grab, W, H, modelSize, alphaBuf);
+        alphaBuf = lastRaw;
+        // person region har N frames par refresh (mahenga hai, har frame nahi chahiye)
+        if (personMode && (idx % regionEvery === 0 || !personRegion)) {
+          const pr = await fastPersonRegion(grab, W, H, {
+            keepAccessories: $('#keepAcc').checked, keepBag: $('#keepBag').checked });
+          if (pr) personRegion = await dilateRegion(pr, W, H, +($('#grow')?.value || 6));
+        }
+        // region ke bahar ka alpha kill (bed/mirror/objects hatao)
+        if (personMode && personRegion) {
+          for (let i = 0; i < W * H; i++) if (personRegion[i] < 128) lastRaw[i] = 0;
         }
       }
+      // temporal smoothing
+      const curAlpha = blendAlpha(prevAlpha, lastRaw, W, H, smooth);
+      prevAlpha = curAlpha;
 
       // compose
       ox.clearRect(0, 0, W, H);
       if (bgMode === 'green') { ox.fillStyle = '#00b140'; ox.fillRect(0, 0, W, H); }
       else if (bgMode === 'color') { ox.fillStyle = bgCol; ox.fillRect(0, 0, W, H); }
       else if (bgMode === 'blur') {
-        ox.filter = 'blur(14px)'; ox.drawImage(grab, 0, 0); ox.filter = 'none';
+        ox.save(); ox.filter = `blur(${Math.max(8, W / 60)}px)`;
+        ox.drawImage(grab, 0, 0); ox.restore();
       }
       const fr = gx.getImageData(0, 0, W, H);
-      if (lastAlpha) for (let i = 0; i < W * H; i++) fr.data[4 * i + 3] = lastAlpha[i];
-      const tmp = canvasOf(W, H); tmp.getContext('2d').putImageData(fr, 0, 0);
+      for (let i = 0; i < W * H; i++) fr.data[4 * i + 3] = curAlpha[i];
+      tcx.clearRect(0, 0, W, H);
+      tcx.putImageData(fr, 0, 0);
       ox.drawImage(tmp, 0, 0);
+
+      if (canManual) track.requestFrame();
       px.clearRect(0, 0, W, H); px.drawImage(out, 0, 0);
 
-      const p = t / dur;
+      const p = (idx + 1) / total;
       const el = (performance.now() - t0) / 1000;
-      const eta = p > 0.02 ? Math.round(el / p - el) : 0;
-      setProg(p, `frame ${idx} · ${(100 * p).toFixed(0)}% · ETA ${eta}s`);
-      await sleep(0);
+      const eta = p > 0.03 ? Math.round(el / p - el) : 0;
+      const rate = ((idx + 1) / Math.max(0.001, el)).toFixed(1);
+      setProg(p, `frame ${idx + 1}/${total} · ${(100 * p).toFixed(0)}% · ${rate} fps · ETA ${eta}s`);
+      if ((idx & 7) === 0) await sleep(0);        // yield kam, throughput zyada
     }
 
-    rec.stop(); await done;
+    if (pump) { pump.stop(); v.pause(); }
+    await sleep(150);
+    rec.stop();
+    await stopped;
     if (audioTrack) audioTrack.stop();
+
     const blob = new Blob(chunks, { type: mime.split(';')[0] || 'video/webm' });
+    if (!blob.size) throw new Error('encoder ne kuch output nahi diya');
     const ext = blob.type.includes('mp4') ? 'mp4' : 'webm';
     const name = vidFile.name.replace(/\.[^.]+$/, '') + (alpha ? '-alpha' : '-nobg') + '.' + ext;
     const url = URL.createObjectURL(blob);
     $('#vidOut').innerHTML =
-      `<video src="${url}" controls loop style="max-width:100%;border-radius:10px;background:#222"></video>
-       <p><a class="go" href="${url}" download="${name}" style="display:inline-block;text-decoration:none">⬇ Download ${name} (${(blob.size/1048576).toFixed(1)} MB)</a></p>`;
+      `<video src="${url}" controls loop autoplay muted playsinline
+         style="max-width:100%;border-radius:10px;background:
+         linear-gradient(45deg,#222 25%,transparent 25%),linear-gradient(-45deg,#222 25%,transparent 25%),
+         linear-gradient(45deg,transparent 75%,#222 75%),linear-gradient(-45deg,transparent 75%,#222 75%);
+         background-size:20px 20px"></video>
+       <p><a class="go" href="${url}" download="${name}"
+          style="display:inline-block;text-decoration:none">⬇ Download ${name} (${(blob.size/1048576).toFixed(1)} MB)</a></p>`;
     setProg(0);
-    log(`✅ video ready — ${name} · ${(blob.size/1048576).toFixed(1)} MB · ${idx} frames`, 'ok');
-    if (alpha) log('ℹ Alpha WebM: Chrome/Edge + video editors (Premiere/DaVinci/CapCut) me transparency dikhega. WhatsApp jaise apps alpha support nahi karte — waha green/colour mode use karo.', 'warn');
+    const secs = ((performance.now() - t0) / 1000).toFixed(1);
+    log(`✅ ready — ${name} · ${(blob.size/1048576).toFixed(1)} MB · ${secs}s · ${(total/secs).toFixed(1)} fps avg`, 'ok');
+    if (alpha) log('ℹ Alpha WebM: Chrome, Premiere, DaVinci, CapCut me transparency dikhegi. WhatsApp/Insta alpha support nahi karte — waha green screen mode lo.', 'warn');
   } catch (e) {
     console.error(e); log('✖ video error: ' + e.message, 'err'); setProg(0);
+  } finally {
+    $$('.go').forEach(b => b.disabled = false);
+    $('#vidStop').disabled = true; running = false;
   }
-  $$('.go').forEach(b => b.disabled = false); $('#vidStop').disabled = true; running = false;
 };
 
 /* ============ upload (telegra.ph style) ============ */
@@ -1734,7 +1965,7 @@ async function runAuto() {
 $('#runAuto').onclick = runAuto;
 
 /* live slider values */
-[['grow','%'],['shrink',''],['feather',''],['ocrConf',''],['zoneWidth','%']].forEach(([id,suf])=>{
+[['grow','%'],['shrink',''],['feather',''],['ocrConf',''],['zoneWidth','%'],['vidSmooth','%']].forEach(([id,suf])=>{
   const el=$('#'+id), out=$('#'+id+'V');
   if(el&&out){ const u=()=>out.textContent=el.value+suf; el.oninput=u; u(); }
 });
@@ -1903,4 +2134,4 @@ addEventListener('beforeunload', () => { try { ocrWorker?.terminate(); } catch(e
 /* warm up in background so first real run is fast */
 addEventListener('load', () => { cvReady().then(() => log('✅ OpenCV engine ready', 'ok')).catch(() => {}); });
 log('👋 Ready. Images drop karo — sab kuch automatically ho jayega.');
-log('🏷 build v10.0-zone · memory-safe · MAX_PIXELS=' + (MAX_PIXELS/1e6).toFixed(0) + 'MP · deviceMemory=' + (navigator.deviceMemory||'?') + 'GB', 'ok');
+log('🏷 build v12.0-fast · memory-safe · MAX_PIXELS=' + (MAX_PIXELS/1e6).toFixed(0) + 'MP · deviceMemory=' + (navigator.deviceMemory||'?') + 'GB', 'ok');
