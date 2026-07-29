@@ -775,114 +775,8 @@ async function initOCR() {
 }
 
 /** OCR se word boxes nikalo. Returns [{x,y,w,h,text,conf}] full-res coords me */
-async function ocrBoxes(canvas, minConf) {
-  await initOCR();
-  // OCR chhoti image par bhi theek chalta hai; 1600px cap = speed
-  const cap = 1600;
-  const f = Math.min(1, cap / Math.max(canvas.width, canvas.height));
-  let feed = canvas;
-  if (f < 1) {
-    feed = canvasOf(Math.round(canvas.width * f), Math.round(canvas.height * f));
-    const fx = feed.getContext('2d');
-    fx.imageSmoothingQuality = 'high';
-    fx.drawImage(canvas, 0, 0, feed.width, feed.height);
-  }
-  const { data } = await ocrWorker.recognize(feed);
-  const inv = f < 1 ? 1 / f : 1;
-  const out = [];
-  for (const w of (data.words || [])) {
-    const t = (w.text || '').trim();
-    if (!t) continue;
-    if (w.confidence < minConf) continue;
-    const b = w.bbox;
-    out.push({
-      x: Math.round(b.x0 * inv), y: Math.round(b.y0 * inv),
-      w: Math.round((b.x1 - b.x0) * inv), h: Math.round((b.y1 - b.y0) * inv),
-      text: t, conf: Math.round(w.confidence),
-    });
-  }
-  return out;
-}
-
-/** Box ke andar sirf TEXT STROKE pixels ka mask (poora rectangle nahi).
-    Isse text ke aas-paas ka asli photo bilkul safe rehta hai.            */
-function strokeMaskInBox(src, b, pad) {
-  const x = Math.max(0, b.x - pad), y = Math.max(0, b.y - pad);
-  const w = Math.min(src.cols - x, b.w + 2 * pad), h = Math.min(src.rows - y, b.h + 2 * pad);
-  if (w < 2 || h < 2) return null;
-  const rect = new cv.Rect(x, y, w, h);
-  const roi = src.roi(rect);
-  const g = new cv.Mat(), bw = new cv.Mat();
-  cv.cvtColor(roi, g, cv.COLOR_RGBA2GRAY);
-  // Otsu dono direction me: text light-on-dark ya dark-on-light ho sakta hai
-  const t1 = new cv.Mat(), t2 = new cv.Mat();
-  cv.threshold(g, t1, 0, 255, cv.THRESH_BINARY | cv.THRESH_OTSU);
-  cv.threshold(g, t2, 0, 255, cv.THRESH_BINARY_INV | cv.THRESH_OTSU);
-  // jisme kam pixels hain wahi text hai (text background se chhota hota hai)
-  const n1 = cv.countNonZero(t1), n2 = cv.countNonZero(t2);
-  (n1 <= n2 ? t1 : t2).copyTo(bw);
-  // stroke ko thoda mota karo taaki anti-aliased kinare bhi cover ho
-  const k = cv.getStructuringElement(cv.MORPH_ELLIPSE, new cv.Size(3, 3));
-  cv.dilate(bw, bw, k);
-  roi.delete(); g.delete(); t1.delete(); t2.delete(); k.delete();
-  return { mat: bw, rect };
-}
-
-/** OCR-based mask: sirf text strokes, aur sirf un words par jo filter paas karein */
-async function ocrMask(src, canvas, opts) {
-  const t0 = performance.now();
-  const boxes = await ocrBoxes(canvas, opts.minConf);
-  const mask = cv.Mat.zeros(src.rows, src.cols, cv.CV_8U);
-  const area = src.rows * src.cols;
-  const used = [];
-  let skipSkin = 0, skipSize = 0;
-
-  let prot = null;
-  if (opts.protectFace) {
-    const small = new cv.Mat();
-    const f = Math.min(1, 900 / Math.max(src.cols, src.rows));
-    if (f < 1) cv.resize(src, small, new cv.Size(Math.round(src.cols*f), Math.round(src.rows*f)), 0,0, cv.INTER_AREA);
-    else src.copyTo(small);
-    const sm = skinMask(small);
-    prot = new cv.Mat();
-    cv.resize(sm, prot, new cv.Size(src.cols, src.rows), 0, 0, cv.INTER_NEAREST);
-    sm.delete(); small.delete();
-  }
-
-  for (const b of boxes) {
-    const ba = b.w * b.h;
-    if (ba < 24 || ba > area * 0.4) { skipSize++; continue; }
-    if (prot) {
-      const r = new cv.Rect(Math.max(0,b.x), Math.max(0,b.y),
-        Math.min(src.cols-Math.max(0,b.x), b.w), Math.min(src.rows-Math.max(0,b.y), b.h));
-      if (r.width > 1 && r.height > 1) {
-        const pr = prot.roi(r); const sf = cv.countNonZero(pr) / (r.width*r.height); pr.delete();
-        if (sf > 0.25) { skipSkin++; continue; }
-      }
-    }
-    const pad = Math.max(2, Math.round(b.h * 0.15));
-    const sm = strokeMaskInBox(src, b, pad);
-    if (!sm) continue;
-    const dstRoi = mask.roi(sm.rect);
-    cv.bitwise_or(dstRoi, sm.mat, dstRoi);
-    dstRoi.delete(); sm.mat.delete();
-    used.push({ x: sm.rect.x, y: sm.rect.y, w: sm.rect.width, h: sm.rect.height,
-                text: b.text, conf: b.conf });
-  }
-  if (prot) {
-    const inv = new cv.Mat(); cv.bitwise_not(prot, inv);
-    cv.bitwise_and(mask, inv, mask); inv.delete(); prot.delete();
-  }
-  mask.__boxes = used;
-  mask.__count = used.length;
-  mask.__words = used.map(u => u.text);
-  mask.__ms = Math.round(performance.now() - t0);
-  mask.__skipped = { skin: skipSkin, size: skipSize };
-  return mask;
-}
-
 /** PIXEL-EXACT compose: sirf mask>0 wale pixels replace, baaki byte-for-byte original.
-    Ye guarantee hai ki photo ka koi aur pixel kabhi nahi badlega.          */
+    Guarantee: photo ka koi aur pixel kabhi nahi badlega.                  */
 function composeExact(origCanvas, inpaintedMat, mask) {
   const w = origCanvas.width, h = origCanvas.height;
   const out = canvasOf(w, h), ox = out.getContext('2d');
@@ -893,16 +787,20 @@ function composeExact(origCanvas, inpaintedMat, mask) {
   cv.imshow(tmp, inpaintedMat);
   const id = tmp.getContext('2d').getImageData(0, 0, w, h);
 
-  const md = mask.data;                               // CV_8U, w*h
+  // mask CV_8U -> ensure continuous data of length w*h
+  let md = mask.data;
+  if (md.length !== w * h) {                 // non-continuous fallback
+    const cm = mask.clone(); md = new Uint8Array(cm.data); cm.delete();
+  }
   let changed = 0;
   for (let i = 0; i < w * h; i++) {
     const m = md[i];
-    if (m === 0) continue;                            // untouched
+    if (m === 0) continue;
     changed++;
     const o = 4 * i;
-    if (m === 255) {
+    if (m >= 250) {
       od.data[o] = id.data[o]; od.data[o+1] = id.data[o+1]; od.data[o+2] = id.data[o+2];
-    } else {                                          // feathered edge -> blend
+    } else {
       const a = m / 255, ia = 1 - a;
       od.data[o]   = id.data[o]   * a + od.data[o]   * ia;
       od.data[o+1] = id.data[o+1] * a + od.data[o+1] * ia;
@@ -910,7 +808,281 @@ function composeExact(origCanvas, inpaintedMat, mask) {
     }
   }
   ox.putImageData(od, 0, 0);
+  tmp.width = tmp.height = 0;
   out.__changed = changed;
+  return out;
+}
+
+/* ---------- MULTI-PASS OCR ----------
+   Ek pass me faint / low-contrast / rotated / skin-par-wala text miss ho jaata hai.
+   Ab image ke KAI variants par OCR chalta hai aur saare results merge hote hain:
+     1. original
+     2. contrast-boosted (CLAHE)  -> faint text
+     3. inverted                  -> light-on-dark text
+     4. sharpened + upscaled 2x   -> chhota text
+     5. binarized (adaptive)      -> low-contrast text
+   Har variant ke boxes dedupe hote hain (IoU).                              */
+function variantCanvases(canvas, level) {
+  const outs = [{ c: canvas, tag: 'orig', up: 1 }];
+  const W = canvas.width, H = canvas.height;
+  const src = cv.imread(canvas);
+  const gray = new cv.Mat();
+  cv.cvtColor(src, gray, cv.COLOR_RGBA2GRAY);
+
+  const mk = (mat, tag, up) => {
+    const cc = canvasOf(mat.cols, mat.rows);
+    cv.imshow(cc, mat);
+    outs.push({ c: cc, tag, up: up || 1 });
+  };
+
+  // 2. CLAHE contrast boost
+  const cl = new cv.Mat();
+  const clahe = new cv.CLAHE(3.0, new cv.Size(8, 8));
+  clahe.apply(gray, cl);
+  mk(cl, 'clahe'); clahe.delete();
+
+  // 3. inverted
+  const inv = new cv.Mat();
+  cv.bitwise_not(gray, inv);
+  mk(inv, 'invert');
+
+  if (level >= 2) {
+    // 4. upscale 2x + sharpen (chhote text ke liye)
+    const up = new cv.Mat();
+    cv.resize(gray, up, new cv.Size(W * 2, H * 2), 0, 0, cv.INTER_CUBIC);
+    const blur = new cv.Mat(), sharp = new cv.Mat();
+    cv.GaussianBlur(up, blur, new cv.Size(0, 0), 3);
+    cv.addWeighted(up, 1.6, blur, -0.6, 0, sharp);
+    mk(sharp, 'up2x', 2);
+    up.delete(); blur.delete(); sharp.delete();
+
+    // 5. adaptive binarize
+    const ad = new cv.Mat();
+    cv.adaptiveThreshold(gray, ad, 255, cv.ADAPTIVE_THRESH_GAUSSIAN_C, cv.THRESH_BINARY, 25, 10);
+    mk(ad, 'adaptive');
+    ad.delete();
+
+    // 6. inverted adaptive
+    const ad2 = new cv.Mat();
+    cv.adaptiveThreshold(gray, ad2, 255, cv.ADAPTIVE_THRESH_GAUSSIAN_C, cv.THRESH_BINARY_INV, 25, 10);
+    mk(ad2, 'adaptive-inv');
+    ad2.delete();
+  }
+  src.delete(); gray.delete(); cl.delete(); inv.delete();
+  return outs;
+}
+
+const iou = (a, b) => {
+  const x1 = Math.max(a.x, b.x), y1 = Math.max(a.y, b.y);
+  const x2 = Math.min(a.x + a.w, b.x + b.w), y2 = Math.min(a.y + a.h, b.y + b.h);
+  if (x2 <= x1 || y2 <= y1) return 0;
+  const i = (x2 - x1) * (y2 - y1);
+  return i / (a.w * a.h + b.w * b.h - i);
+};
+
+async function ocrBoxes(canvas, minConf, level) {
+  await initOCR();
+  const cap = 1800;
+  const f = Math.min(1, cap / Math.max(canvas.width, canvas.height));
+  let base = canvas;
+  if (f < 1) {
+    base = canvasOf(Math.round(canvas.width * f), Math.round(canvas.height * f));
+    const fx = base.getContext('2d');
+    fx.imageSmoothingQuality = 'high';
+    fx.drawImage(canvas, 0, 0, base.width, base.height);
+  }
+  const invF = f < 1 ? 1 / f : 1;
+  const variants = variantCanvases(base, level);
+  const all = [];
+
+  for (let vi = 0; vi < variants.length; vi++) {
+    const v = variants[vi];
+    setProg(0.15 + 0.5 * (vi / variants.length), `OCR pass ${vi + 1}/${variants.length} (${v.tag})`);
+    let data;
+    try { ({ data } = await ocrWorker.recognize(v.c)); } catch (e) { continue; }
+    const sc = invF / v.up;
+    for (const w of (data.words || [])) {
+      const t = (w.text || '').trim();
+      if (!t || t.length < 1) continue;
+      if (w.confidence < minConf) continue;
+      if (!/[A-Za-z0-9@#©®™.\-_/]/.test(t)) continue;     // garbage reject
+      const bb = w.bbox;
+      all.push({
+        x: Math.round(bb.x0 * sc), y: Math.round(bb.y0 * sc),
+        w: Math.round((bb.x1 - bb.x0) * sc), h: Math.round((bb.y1 - bb.y0) * sc),
+        text: t, conf: Math.round(w.confidence), via: v.tag,
+      });
+    }
+    if (v.c !== base && v.c !== canvas) v.c.width = v.c.height = 0;   // free
+  }
+
+  setProg(0);
+  // dedupe by IoU, keep highest confidence
+  all.sort((p, q) => q.conf - p.conf);
+  const keep = [];
+  for (const b of all) {
+    if (b.w < 4 || b.h < 4) continue;
+    if (keep.some(k => iou(k, b) > 0.35)) continue;
+    keep.push(b);
+  }
+  return keep;
+}
+
+/* ---------- GRAPHIC / LOGO WATERMARK DETECTION ----------
+   Text ke alawa logo, symbol, semi-transparent overlay pakadta hai.
+   Repeating-pattern + uniform-alpha regions dhoondta hai.                */
+function graphicWatermarkBoxes(src, strength) {
+  const boxes = [];
+  const gray = new cv.Mat(), blur = new cv.Mat(), diff = new cv.Mat(), th = new cv.Mat();
+  cv.cvtColor(src, gray, cv.COLOR_RGBA2GRAY);
+  const sc = Math.max(1, Math.round(Math.min(src.cols, src.rows) / 500));
+  cv.GaussianBlur(gray, blur, new cv.Size(0, 0), 4 * sc);
+  cv.absdiff(gray, blur, diff);
+  cv.threshold(diff, th, Math.max(4, 14 - strength), 255, cv.THRESH_BINARY);
+  const k = cv.getStructuringElement(cv.MORPH_ELLIPSE, new cv.Size(7 * sc, 7 * sc));
+  cv.morphologyEx(th, th, cv.MORPH_CLOSE, k);
+  const c = new cv.MatVector(), h = new cv.Mat();
+  cv.findContours(th, c, h, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE);
+  const area = src.rows * src.cols;
+  for (let i = 0; i < c.size(); i++) {
+    const r = cv.boundingRect(c.get(i));
+    const a = r.width * r.height;
+    if (a < 300 * sc * sc || a > area * 0.2) continue;
+    const roi = th.roi(r); const d = cv.countNonZero(roi) / a; roi.delete();
+    if (d > 0.22) boxes.push({ x: r.x, y: r.y, w: r.width, h: r.height, text: '[graphic]', conf: 0, via: 'graphic' });
+  }
+  gray.delete(); blur.delete(); diff.delete(); th.delete(); k.delete(); c.delete(); h.delete();
+  return boxes;
+}
+
+/* ---------- SKIN-AWARE MASK ----------
+   Pehle skin par ka poora box reject hota tha -> haath ke paas ka text bach jaata tha.
+   Ab reject nahi karte: skin par bhi text hataate hain, LEKIN sirf uske
+   STROKE pixels, aur inpaint skin ke aas-paas ke rang se hota hai.
+   Face (aankh/hoth) alag se protect hota hai kyunki wahan features hote hain.  */
+function faceProtectMask(src) {
+  // sirf FACE features protect karo, poora skin nahi
+  const gray = new cv.Mat();
+  cv.cvtColor(src, gray, cv.COLOR_RGBA2GRAY);
+  const prot = cv.Mat.zeros(src.rows, src.cols, cv.CV_8U);
+  try {
+    if (window.__faceBoxes && window.__faceBoxes.length) {
+      for (const f of window.__faceBoxes) {
+        cv.rectangle(prot, new cv.Point(f.x, f.y), new cv.Point(f.x + f.w, f.y + f.h),
+          new cv.Scalar(255), -1);
+      }
+    }
+  } catch (e) {}
+  gray.delete();
+  return prot;
+}
+
+/** stroke mask with local-contrast fallback (faint text ke liye) */
+function strokeMaskInBox2(src, b, pad, aggressive) {
+  const x = Math.max(0, b.x - pad), y = Math.max(0, b.y - pad);
+  const w = Math.min(src.cols - x, b.w + 2 * pad), h = Math.min(src.rows - y, b.h + 2 * pad);
+  if (w < 2 || h < 2) return null;
+  const rect = new cv.Rect(x, y, w, h);
+  const roi = src.roi(rect);
+  const g = new cv.Mat();
+  cv.cvtColor(roi, g, cv.COLOR_RGBA2GRAY);
+
+  const t1 = new cv.Mat(), t2 = new cv.Mat();
+  cv.threshold(g, t1, 0, 255, cv.THRESH_BINARY | cv.THRESH_OTSU);
+  cv.threshold(g, t2, 0, 255, cv.THRESH_BINARY_INV | cv.THRESH_OTSU);
+  const n1 = cv.countNonZero(t1), n2 = cv.countNonZero(t2);
+  const bw = new cv.Mat();
+  (n1 <= n2 ? t1 : t2).copyTo(bw);
+
+  // agar Otsu ne bahut kam ya bahut zyada pakda -> local contrast se retry
+  const frac = cv.countNonZero(bw) / (w * h);
+  if (frac < 0.02 || frac > 0.75) {
+    const blur = new cv.Mat(), d = new cv.Mat();
+    cv.GaussianBlur(g, blur, new cv.Size(0, 0), Math.max(2, h / 6));
+    cv.absdiff(g, blur, d);
+    cv.threshold(d, bw, 0, 255, cv.THRESH_BINARY | cv.THRESH_OTSU);
+    blur.delete(); d.delete();
+  }
+  // aggressive = stroke thoda aur mota (residue na bache)
+  const kk = aggressive ? 5 : 3;
+  const k = cv.getStructuringElement(cv.MORPH_ELLIPSE, new cv.Size(kk, kk));
+  cv.dilate(bw, bw, k);
+  cv.morphologyEx(bw, bw, cv.MORPH_CLOSE, k);
+  roi.delete(); g.delete(); t1.delete(); t2.delete(); k.delete();
+  return { mat: bw, rect };
+}
+
+async function ocrMask(src, canvas, opts) {
+  const t0 = performance.now();
+  let boxes = await ocrBoxes(canvas, opts.minConf, opts.level);
+  if (opts.graphic) boxes = boxes.concat(graphicWatermarkBoxes(src, opts.gstrength || 5));
+
+  const mask = cv.Mat.zeros(src.rows, src.cols, cv.CV_8U);
+  const area = src.rows * src.cols;
+  const used = [];
+  let skipFace = 0, skipSize = 0;
+
+  const prot = opts.protectFace ? faceProtectMask(src) : null;
+
+  for (const b of boxes) {
+    const ba = b.w * b.h;
+    if (ba < 20 || ba > area * 0.45) { skipSize++; continue; }
+    if (prot) {
+      const rx = Math.max(0, b.x), ry = Math.max(0, b.y);
+      const rw = Math.min(src.cols - rx, b.w), rh = Math.min(src.rows - ry, b.h);
+      if (rw > 1 && rh > 1) {
+        const pr = prot.roi(new cv.Rect(rx, ry, rw, rh));
+        const sf = cv.countNonZero(pr) / (rw * rh); pr.delete();
+        if (sf > 0.35) { skipFace++; continue; }
+      }
+    }
+    const pad = Math.max(3, Math.round(b.h * 0.22));
+    const sm = strokeMaskInBox2(src, b, pad, opts.aggressive);
+    if (!sm) continue;
+    const dstRoi = mask.roi(sm.rect);
+    cv.bitwise_or(dstRoi, sm.mat, dstRoi);
+    dstRoi.delete(); sm.mat.delete();
+    used.push({ x: sm.rect.x, y: sm.rect.y, w: sm.rect.width, h: sm.rect.height,
+                text: b.text, conf: b.conf, via: b.via });
+  }
+  if (prot) {
+    const inv = new cv.Mat(); cv.bitwise_not(prot, inv);
+    cv.bitwise_and(mask, inv, mask); inv.delete(); prot.delete();
+  }
+  mask.__boxes = used;
+  mask.__count = used.length;
+  mask.__words = used.map(u => u.text);
+  mask.__ms = Math.round(performance.now() - t0);
+  mask.__skipped = { skin: skipFace, size: skipSize };
+  return mask;
+}
+
+/* ---------- CONTENT-AWARE INPAINT ----------
+   Telea chhote text par theek hai par bade watermark par smudge karta hai.
+   Ab mask ke size ke hisaab se radius adjust + multi-scale refinement.    */
+function smartInpaint(rgb, mask, quality) {
+  const out = new cv.Mat();
+  // mask ka average blob size dekho
+  const nz = cv.countNonZero(mask);
+  const scale = Math.sqrt(nz / Math.max(1, (mask.__count || 1)));
+  const radius = Math.max(3, Math.min(12, Math.round(scale / 3)));
+
+  cv.inpaint(rgb, mask, out, radius, cv.INPAINT_TELEA);
+  if (quality === 'best') {
+    const ns = new cv.Mat(), blend = new cv.Mat();
+    cv.inpaint(rgb, mask, ns, radius, cv.INPAINT_NS);
+    cv.addWeighted(out, 0.55, ns, 0.45, 0, blend);
+    blend.copyTo(out); ns.delete(); blend.delete();
+    // second pass: dilated mask par halka refine (seam hatane ke liye)
+    const d = new cv.Mat();
+    const k = cv.getStructuringElement(cv.MORPH_ELLIPSE, new cv.Size(5, 5));
+    cv.dilate(mask, d, k);
+    cv.subtract(d, mask, d);
+    const r2 = new cv.Mat();
+    cv.inpaint(out, d, r2, 3, cv.INPAINT_TELEA);
+    r2.copyTo(out);
+    d.delete(); k.delete(); r2.delete();
+  }
   return out;
 }
 
@@ -918,79 +1090,89 @@ async function cleanImage(url, sens, brushMask, opts_preview) {
   await cvReady();
   const t0 = performance.now();
   const img = capCanvas(await loadImg(url));
-  const c = canvasOf(img.width, img.height);
-  c.getContext('2d').drawImage(img, 0, 0);
-  const src = cv.imread(c);
+  let work = canvasOf(img.width, img.height);
+  work.getContext('2d').drawImage(img, 0, 0);
+  const original = canvasOf(img.width, img.height);
+  original.getContext('2d').drawImage(img, 0, 0);
+
   const quality = $('#cleanQ') ? $('#cleanQ').value : 'fast';
-  const method = $('#detMethod') ? $('#detMethod').value : 'ocr';
+  const method  = $('#detMethod') ? $('#detMethod').value : 'ocr';
+  const passes  = brushMask ? 1 : +($('#ocrPasses')?.value || 2);
+  const level   = +($('#ocrLevel')?.value || 2);
+  const cap     = +($('#cleanCap')?.value || 25) / 100;
 
-  let mask;
-  if (brushMask) {
-    mask = brushMask(src);
-  } else if (method === 'ocr') {
-    mask = await ocrMask(src, c, {
-      minConf: +($('#ocrConf')?.value || 55),
-      protectFace: $('#protectFace') ? $('#protectFace').checked : true,
-    });
-  } else {
-    mask = autoMask(src, sens);
-  }
+  const accum = cv.Mat.zeros(img.height, img.width, cv.CV_8U);
+  let allWords = [], totalBoxes = 0, skipped = { skin: 0, size: 0 };
 
-  // safety cap
-  const covered = cv.countNonZero(mask);
-  const cap = +($('#cleanCap')?.value || 25) / 100;
-  if (covered / (src.rows * src.cols) > cap) {
-    log(`   ⚠ mask ${(100*covered/(src.rows*src.cols)).toFixed(0)}% > cap — skip (kuch nahi badla)`, 'warn');
-    mask.setTo(new cv.Scalar(0));
-  }
-  const finalCovered = cv.countNonZero(mask);
-
-  // ---- preview ----
-  if (opts_preview) {
-    const pv = canvasOf(src.cols, src.rows);
-    pv.getContext('2d').drawImage(c, 0, 0);
-    const g = pv.getContext('2d');
-    const im = g.getImageData(0, 0, src.cols, src.rows);
-    const md = mask.data;
-    for (let i = 0; i < src.cols * src.rows; i++) {
-      if (md[i] > 0) { const o = 4*i;
-        im.data[o] = 255; im.data[o+1] = 40; im.data[o+2] = 90; }
+  for (let p = 0; p < passes; p++) {
+    const src = cv.imread(work);
+    let mask;
+    if (brushMask) {
+      mask = brushMask(src);
+    } else if (method === 'ocr') {
+      mask = await ocrMask(src, work, {
+        minConf: +($('#ocrConf')?.value || 55) - p * 10,   // har pass me thoda dheela
+        protectFace: $('#protectFace') ? $('#protectFace').checked : true,
+        level, aggressive: p > 0,
+        graphic: $('#detGraphic')?.checked,
+        gstrength: +($('#sens')?.value || 5),
+      });
+    } else {
+      mask = autoMask(src, sens);
     }
-    g.putImageData(im, 0, 0);
-    // boxes bhi draw karo
-    g.strokeStyle = '#3fb950'; g.lineWidth = Math.max(1, src.cols/500); g.font = `${Math.max(11, src.cols/70)}px monospace`;
-    g.fillStyle = '#3fb950';
-    for (const b of (mask.__boxes || [])) {
-      g.strokeRect(b.x, b.y, b.w, b.h);
-      if (b.text) g.fillText(`${b.text} ${b.conf||''}`, b.x, Math.max(10, b.y - 3));
-    }
-    const words = mask.__words || [];
-    const pct = (100 * finalCovered / (src.rows * src.cols)).toFixed(2);
+
+    const found = cv.countNonZero(mask);
     const cnt = mask.__count || 0;
-    const sk = mask.__skipped;
-    src.delete(); mask.delete();
-    return { canvas: pv, pct, covered: finalCovered, ms: Math.round(performance.now()-t0),
-             preview: true, boxes: cnt, words, skipped: sk };
+    if (mask.__skipped) { skipped.skin += mask.__skipped.skin; skipped.size += mask.__skipped.size; }
+
+    if (found === 0 || cnt === 0) {
+      src.delete(); mask.delete();
+      if (p === 0) break;
+      log(`   pass ${p + 1}: kuch nahi bacha ✓`);
+      break;
+    }
+    // accumulate for reporting/preview
+    cv.bitwise_or(accum, mask, accum);
+    allWords = allWords.concat(mask.__words || []);
+    totalBoxes += cnt;
+
+    if (opts_preview) { src.delete(); mask.delete(); break; }
+
+    // cap check on accumulated
+    if (cv.countNonZero(accum) / (img.width * img.height) > cap) {
+      log(`   ⚠ cap ${(cap*100)|0}% cross — ye pass skip`, 'warn');
+      src.delete(); mask.delete(); break;
+    }
+
+    const rgb = new cv.Mat(); cv.cvtColor(src, rgb, cv.COLOR_RGBA2RGB);
+    mask.__count = cnt;
+    const dst = smartInpaint(rgb, mask, quality);
+    const soft = new cv.Mat(); mask.copyTo(soft);
+    cv.GaussianBlur(soft, soft, new cv.Size(3, 3), 0);
+    work = composeExact(work, dst, soft);
+    log(`   pass ${p + 1}: ${cnt} region · ${(mask.__words||[]).slice(0,5).join(', ')}`);
+    rgb.delete(); dst.delete(); soft.delete(); src.delete(); mask.delete();
   }
 
-  // ---- apply: pixel-exact ----
-  let outCanvas = c, changed = 0;
-  if (finalCovered > 0) {
-    // feather mask edges thoda taaki seam na dikhe
-    const soft = new cv.Mat();
-    mask.copyTo(soft);
-    cv.GaussianBlur(soft, soft, new cv.Size(3, 3), 0);
-    const dst = inpaintWith(src, mask, quality);
-    outCanvas = composeExact(c, dst, soft);
-    changed = outCanvas.__changed || 0;
-    dst.delete(); soft.delete();
+  const covered = cv.countNonZero(accum);
+  const pct = (100 * covered / (img.width * img.height)).toFixed(2);
+
+  if (opts_preview) {
+    const pv = canvasOf(img.width, img.height);
+    const g = pv.getContext('2d');
+    g.drawImage(original, 0, 0);
+    const im = g.getImageData(0, 0, img.width, img.height);
+    const md = accum.data;
+    for (let i = 0; i < img.width * img.height; i++)
+      if (md[i] > 0) { const o = 4*i; im.data[o]=255; im.data[o+1]=40; im.data[o+2]=90; }
+    g.putImageData(im, 0, 0);
+    accum.delete();
+    return { canvas: pv, pct, covered, ms: Math.round(performance.now()-t0),
+             preview: true, boxes: totalBoxes, words: allWords, skipped };
   }
-  const pct = (100 * finalCovered / (src.rows * src.cols)).toFixed(2);
-  const boxes = mask.__count || 0;
-  const words = mask.__words || [];
-  const ms = Math.round(performance.now() - t0);
-  src.delete(); mask.delete();
-  return { canvas: outCanvas, pct, covered: finalCovered, ms, boxes, words, changed };
+  accum.delete();
+  return { canvas: work, pct, covered, ms: Math.round(performance.now() - t0),
+           boxes: totalBoxes, words: allWords, skipped };
 }
 
 /* ============ convert / resize ============ */
@@ -1374,8 +1556,8 @@ $('#previewClean').onclick = async () => {
     }
     if (r.skipped && (r.skipped.skin || r.skipped.size))
       log(`   🛡 skipped: ${r.skipped.skin} skin/face par, ${r.skipped.size} size se bahar`);
-  } catch (e) { log('✖ ' + e.message, 'err'); }
-  $$('.go').forEach(b => b.disabled = false);
+  } catch (e) { log('✖ ' + e.message, 'err'); console.error(e); }
+  finally { $$('.go').forEach(b => b.disabled = false); setProg(0); }
 };
 
 $('#runHost').onclick = async () => {
@@ -1455,4 +1637,4 @@ addEventListener('beforeunload', () => { try { ocrWorker?.terminate(); } catch(e
 /* warm up in background so first real run is fast */
 addEventListener('load', () => { cvReady().then(() => log('✅ OpenCV engine ready', 'ok')).catch(() => {}); });
 log('👋 Ready. Images drop karo — sab kuch automatically ho jayega.');
-log('🏷 build v7.0-ocr · memory-safe · MAX_PIXELS=' + (MAX_PIXELS/1e6).toFixed(0) + 'MP · deviceMemory=' + (navigator.deviceMemory||'?') + 'GB', 'ok');
+log('🏷 build v8.0-multipass · memory-safe · MAX_PIXELS=' + (MAX_PIXELS/1e6).toFixed(0) + 'MP · deviceMemory=' + (navigator.deviceMemory||'?') + 'GB', 'ok');
