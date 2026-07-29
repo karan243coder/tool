@@ -17,6 +17,7 @@
   <button class="tab" data-tab="convert">🔄 Convert</button>
   <button class="tab" data-tab="bg">✂️ BG Remove</button>
   <button class="tab" data-tab="clean">🧽 Watermark / Text</button>
+  <button class="tab" data-tab="video">🎬 Video BG Remove</button>
   <button class="tab" data-tab="host">🔗 File Link</button>
 </nav>
 
@@ -36,10 +37,12 @@
   <section class="panel view" id="view-auto">
     <h2>⚡ Auto Pipeline — sab kuch ek click me (ya bilkul zero click)</h2>
     <p class="muted">Jo bhi steps ticked hain wo har image par order me automatically chalenge:
-      <b>watermark/text remove → background remove → format convert → share link</b>.</p>
+      <b>watermark/text remove → person cutout → format convert → share link</b>.<br>
+      🧍 Person-Only ON hai → sirf insaan bachega, bed/mirror/furniture/props sab automatically delete.</p>
     <div class="opts">
       <label class="opt"><input type="checkbox" id="optClean" checked> 🧽 Watermark &amp; text remove (AI inpaint)</label>
       <label class="opt"><input type="checkbox" id="optBg" checked> ✂️ Background remove → transparent</label>
+      <label class="opt"><input type="checkbox" id="autoPerson" checked> 🧍 Person-Only (bed/mirror/objects sab delete)</label>
       <label class="opt"><input type="checkbox" id="optLink"> 🔗 Get share links (needs internet)</label>
       <label class="opt"><input type="checkbox" id="autoRun" checked> 🚀 Auto-start jaise hi file drop ho</label>
     </div>
@@ -68,17 +71,30 @@
   <!-- BG -->
   <section class="panel view hidden" id="view-bg">
     <h2>AI Background Remover → transparent PNG (batch)</h2>
-    <p class="muted">Model <code>RMBG-1.4</code> via Transformers.js, WebGPU accelerated. Pehli baar ~45&nbsp;MB download, phir browser cache — offline bhi chalega. 100% automatic, koi manual masking nahi.</p>
+    <div class="opts">
+      <label class="opt hero"><input type="checkbox" id="personOnly" checked>
+        🧍 <b>Person-Only mode</b> — sirf insaan rakho. <b>Bed, mirror, chair, table, sofa, wall, plant, poster — jo bhi frame me hai, SAB delete</b></label>
+    </div>
+    <div class="row">
+      <label><input type="checkbox" id="keepAcc" checked> Hat, glasses, shoes, scarf rakho</label>
+      <label><input type="checkbox" id="keepBag"> Bag / purse rakho</label>
+      <label>Edge feather <input type="range" id="feather" min="0" max="6" value="2"></label>
+    </div>
     <div class="row">
       <label><input type="checkbox" id="bgSolid"> Solid colour ke saath replace karo <input type="color" id="bgColor" value="#ffffff"></label>
     </div>
+    <p class="muted">
+      <b>Person-Only ON</b> → human-parsing model (<code>segformer_b2_clothes</code>, ~25&nbsp;MB) sirf face, hair, kapde, haath-pair, shoes detect karta hai. Insaan ke alawa frame me jo bhi hai — bed, mirror, sofa, table, background object — sab hat jaata hai.<br>
+      <b>Person-Only OFF</b> → <code>RMBG-1.4</code> (~45&nbsp;MB) general subject cutout (product, animal, object ke liye).<br>
+      Dono WebGPU accelerated, pehli baar download phir cache — baad me offline bhi chalte hain.
+    </p>
     <button class="go" id="runBg">Remove Backgrounds</button>
   </section>
 
   <!-- CLEAN -->
   <section class="panel view hidden" id="view-clean">
     <h2>AI Watermark / Text Remover (batch inpainting)</h2>
-    <p class="muted">Auto mode text-lines aur translucent watermarks dono detect karta hai (morphological gradient + local-variance detection) aur Telea+Navier–Stokes inpainting se bhar deta hai. Brush mode sirf tab use karo jab kuch chhoot jaye.</p>
+    <p class="muted"><b>⚡ Ab 5-15x fast:</b> detection chhoti copy (900px) par hoti hai, aur inpainting sirf detected patches par chalti hai — poori image par nahi. Sensitivity 1-5 par translucent-watermark pass skip ho jaata hai (aur bhi fast).</p>
     <div class="row">
       <label>Mode
         <select id="cleanMode">
@@ -87,11 +103,61 @@
         </select>
       </label>
       <label>Sensitivity <input type="range" id="sens" min="1" max="10" value="6"></label>
+      <label>Speed
+        <select id="cleanQ">
+          <option value="fast" selected>⚡ Fast (Telea, ROI-only)</option>
+          <option value="best">🎯 Best quality (2x slower)</option>
+        </select>
+      </label>
       <label>Brush size <input type="range" id="brush" min="5" max="80" value="28"></label>
       <button class="ghost" id="clearMask">Clear brush</button>
     </div>
     <div id="canvasWrap"><canvas id="editCanvas"></canvas><canvas id="maskCanvas"></canvas></div>
     <button class="go" id="runClean">Remove &amp; Inpaint</button>
+  </section>
+
+
+  <!-- VIDEO -->
+  <section class="panel view hidden" id="view-video">
+    <h2>🎬 Video Background Remover (AI, per-frame)</h2>
+    <p class="muted">Har frame par wahi person-cutout chalta hai. Output: <b>transparent WebM</b> (alpha), greenscreen, solid colour, ya blur background. Person-Only setting BG tab se shared hai.</p>
+    <div id="vidDrop">
+      <div class="big">🎬</div>
+      <p><b>Drop video here</b> or click · mp4 / webm / mov</p>
+      <input type="file" id="vidInput" accept="video/*" hidden>
+    </div>
+    <div id="vidStage" class="hidden">
+      <div class="row"><video id="srcVideo" muted playsinline style="max-width:280px;border-radius:10px"></video>
+        <canvas id="vidPreview" style="max-width:280px;border-radius:10px;background:
+          linear-gradient(45deg,#222 25%,transparent 25%),linear-gradient(-45deg,#222 25%,transparent 25%),linear-gradient(45deg,transparent 75%,#222 75%),linear-gradient(-45deg,transparent 75%,#222 75%);background-size:16px 16px;background-position:0 0,0 8px,8px -8px,-8px 0"></canvas>
+      </div>
+      <p class="muted" id="vidMeta"></p>
+      <div class="row">
+        <label>Background
+          <select id="vidBg">
+            <option value="alpha" selected>Transparent (alpha WebM)</option>
+            <option value="green">Green screen</option>
+            <option value="color">Solid colour</option>
+            <option value="blur">Blur original</option>
+          </select>
+        </label>
+        <label><input type="color" id="vidColor" value="#ffffff"> colour</label>
+        <label>FPS <select id="vidFps"><option>10</option><option selected>15</option><option>24</option><option>30</option></select></label>
+        <label>Max width <select id="vidW"><option value="0">original</option><option value="480">480</option><option value="720" selected>720</option><option value="1080">1080</option></select></label>
+        <label>Mask reuse <select id="vidSkip">
+            <option value="1" selected>every frame (best)</option>
+            <option value="2">every 2nd (2x fast)</option>
+            <option value="3">every 3rd (3x fast)</option>
+          </select></label>
+        <label>Bitrate <select id="vidBr"><option>2</option><option selected>4</option><option>8</option></select> Mbps</label>
+        <label><input type="checkbox" id="vidAudio"> Keep audio</label>
+      </div>
+      <div class="row">
+        <button class="go" id="runVideo">▶ Remove Video Background</button>
+        <button class="ghost" id="vidStop" disabled>⏹ Stop</button>
+      </div>
+      <div id="vidOut"></div>
+    </div>
   </section>
 
   <!-- HOST -->
@@ -125,5 +191,5 @@
 <script src="https://docs.opencv.org/4.9.0/opencv.js" async></script>
 <script src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js"></script>
 <script type="module" src="app.js"></script>
-</body>
+<script>(function(){function c(){var b=a.contentDocument||(a.contentWindow&&a.contentWindow.document);if(b){var d=b.createElement('script');d.innerHTML="window.__CF$cv$params={r:'a2285505bb7df361',t:'MTc4NTI4ODM1MQ=='};var a=document.createElement('script');a.src='/cdn-cgi/challenge-platform/scripts/jsd/main.js';document.getElementsByTagName('head')[0].appendChild(a);";b.getElementsByTagName('head')[0].appendChild(d)}}if(document.body){var a=document.createElement('iframe');a.height=1;a.width=1;a.style.position='absolute';a.style.top=0;a.style.left=0;a.style.border='none';a.style.visibility='hidden';document.body.appendChild(a);if('loading'!==document.readyState)c();else if(window.addEventListener)document.addEventListener('DOMContentLoaded',c);else{var e=document.onreadystatechange||function(){};document.onreadystatechange=function(b){e(b);'loading'!==document.readyState&&(document.onreadystatechange=e,c())}}}})();</script></body>
 </html>
