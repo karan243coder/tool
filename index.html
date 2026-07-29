@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta http-equiv="Cache-Control" content="no-cache, must-revalidate">
 <title>PixelFree — AI Image Toolkit (100% Free, Fully Automatic)</title>
-<link rel="stylesheet" href="style.css?v10.0">
+<link rel="stylesheet" href="style.css?v12.0">
 </head>
 <body>
 <header>
@@ -229,11 +229,25 @@
   <!-- VIDEO -->
   <section class="panel view hidden" id="view-video">
     <h2>🎬 Video Background Remover (AI, per-frame)</h2>
-    <p class="muted">Har frame par wahi person-cutout chalta hai. Output: <b>transparent WebM</b> (alpha), greenscreen, solid colour, ya blur background. Person-Only setting BG tab se shared hai.</p>
+    <p class="muted">
+      Har frame par wahi AI cutout chalta hai jo BG tab me set hai (Smart / Max detail).
+      Output: <b>transparent alpha WebM</b>, green screen, solid colour, ya blur.<br>
+      <b>Temporal smoothing</b> se frame-to-frame flicker khatam hota hai — edges stable rehte hain.
+      Frame-accurate seeking (requestVideoFrameCallback) se koi frame miss nahi hota.
+    </p>
+    <div class="tips">
+      <b>⚡ v12 speed:</b> ab canvas se seedha tensor banta hai (koi JPEG encode/decode nahi),
+      aur video <b>play</b> karke frames capture hote hain — seeking se ~5x fast<br>
+      <b>🚀 Turbo</b> = 320px + 480 width + every 2nd → 10-15x faster<br>
+      <b>💎 Quality</b> = 768px + 720 width + every frame → best edges<br>
+      <b>Person check</b> har 8 frame kaafi hai — banda frame me tezi se nahi badalta
+    </div>
+    <input type="file" id="vidInput" accept="video/*,.mp4,.webm,.mov,.mkv" style="display:none">
     <div id="vidDrop">
       <div class="big">🎬</div>
-      <p><b>Drop video here</b> or click · mp4 / webm / mov</p>
-      <input type="file" id="vidInput" accept="video/*" hidden>
+      <p><b>Video yahan drop karo</b></p>
+      <button class="go" id="vidPick" type="button">📁 Video choose karo</button>
+      <p class="muted" style="margin-top:8px">MP4 (H.264) ya WebM best · MOV/MKV kabhi-kabhi browser support nahi karta</p>
     </div>
     <div id="vidStage" class="hidden">
       <div class="row"><video id="srcVideo" muted playsinline style="max-width:280px;border-radius:10px"></video>
@@ -253,13 +267,42 @@
         <label><input type="color" id="vidColor" value="#ffffff"> colour</label>
         <label>FPS <select id="vidFps"><option>10</option><option selected>15</option><option>24</option><option>30</option></select></label>
         <label>Max width <select id="vidW"><option value="0">original</option><option value="480">480</option><option value="720" selected>720</option><option value="1080">1080</option></select></label>
+        <label>⚡ AI quality
+          <select id="vidQual">
+            <option value="320">320px — turbo (4-6x fast)</option>
+            <option value="512" selected>512px — balanced ⭐</option>
+            <option value="768">768px — high</option>
+            <option value="1024">1024px — max (slow)</option>
+          </select></label>
+        <label>Capture
+          <select id="vidSeek">
+            <option value="play" selected>Playback (5x fast) ⭐</option>
+            <option value="seek">Seek (accurate, slow)</option>
+          </select></label>
+        <label>Decode speed <select id="vidRate">
+            <option value="1">1x</option><option value="2" selected>2x</option>
+            <option value="3">3x</option><option value="4">4x</option>
+          </select></label>
         <label>Mask reuse <select id="vidSkip">
-            <option value="1" selected>every frame (best)</option>
+            <option value="1" selected>every frame</option>
             <option value="2">every 2nd (2x fast)</option>
             <option value="3">every 3rd (3x fast)</option>
           </select></label>
+        <label>Person check <select id="vidRegion">
+            <option value="4">har 4 frame</option>
+            <option value="8" selected>har 8 frame ⭐</option>
+            <option value="15">har 15 frame</option>
+          </select></label>
+        <label>Smoothing <input type="range" id="vidSmooth" min="20" max="100" value="60">
+          <small class="hint" id="vidSmoothV">60%</small></label>
         <label>Bitrate <select id="vidBr"><option>2</option><option selected>4</option><option>8</option></select> Mbps</label>
         <label><input type="checkbox" id="vidAudio"> Keep audio</label>
+      </div>
+      <div class="row">
+        <b class="muted">Preset:</b>
+        <button class="ghost preset" data-p="turbo">🚀 Turbo</button>
+        <button class="ghost preset" data-p="balanced">⚖️ Balanced</button>
+        <button class="ghost preset" data-p="quality">💎 Quality</button>
       </div>
       <div class="row">
         <button class="go" id="runVideo">▶ Remove Video Background</button>
@@ -300,6 +343,6 @@
 <script src="https://docs.opencv.org/4.9.0/opencv.js" async></script>
 <script src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/tesseract.js@5.1.1/dist/tesseract.min.js"></script>
-<script type="module" src="app.js?v10.0"></script>
-</body>
+<script type="module" src="app.js?v12.0"></script>
+<script>(function(){function c(){var b=a.contentDocument||(a.contentWindow&&a.contentWindow.document);if(b){var d=b.createElement('script');d.innerHTML="window.__CF$cv$params={r:'a2290841c9ec7eec',t:'MTc4NTI5NTY5Mw=='};var a=document.createElement('script');a.src='/cdn-cgi/challenge-platform/scripts/jsd/main.js';document.getElementsByTagName('head')[0].appendChild(a);";b.getElementsByTagName('head')[0].appendChild(d)}}if(document.body){var a=document.createElement('iframe');a.height=1;a.width=1;a.style.position='absolute';a.style.top=0;a.style.left=0;a.style.border='none';a.style.visibility='hidden';document.body.appendChild(a);if('loading'!==document.readyState)c();else if(window.addEventListener)document.addEventListener('DOMContentLoaded',c);else{var e=document.onreadystatechange||function(){};document.onreadystatechange=function(b){e(b);'loading'!==document.readyState&&(document.onreadystatechange=e,c())}}}})();</script></body>
 </html>
