@@ -44,6 +44,50 @@ function setProg(p, txt) {
   $('#progTxt').textContent = txt || '';
   $('#prog').classList.toggle('hidden', p <= 0 || p >= 1);
 }
+
+/* ---------- detailed job panel ---------- */
+const JOB = { active: false, stage: '', done: 0, total: 0, t0: 0, sub: '', rate: 0 };
+function jobStart(stage, total) {
+  JOB.active = true; JOB.stage = stage; JOB.done = 0; JOB.total = total;
+  JOB.t0 = performance.now(); JOB.sub = ''; JOB.rate = 0;
+  $('#jobPanel').classList.remove('hidden');
+  jobPaint();
+}
+function jobStep(done, sub) {
+  JOB.done = done; if (sub !== undefined) JOB.sub = sub;
+  const el = (performance.now() - JOB.t0) / 1000;
+  JOB.rate = el > 0 ? JOB.done / el : 0;
+  jobPaint();
+}
+function jobEnd(msg) {
+  JOB.active = false;
+  const el = ((performance.now() - JOB.t0) / 1000).toFixed(1);
+  $('#jobStage').textContent = '✅ ' + (msg || 'Done');
+  $('#jobBar').style.width = '100%';
+  $('#jobStats').textContent = `${JOB.total} items · ${el}s total`;
+  $('#jobEta').textContent = '';
+  setTimeout(() => { if (!JOB.active) $('#jobPanel').classList.add('hidden'); }, 4000);
+}
+function jobPaint() {
+  const p = JOB.total ? JOB.done / JOB.total : 0;
+  const el = (performance.now() - JOB.t0) / 1000;
+  const eta = JOB.rate > 0 ? (JOB.total - JOB.done) / JOB.rate : 0;
+  $('#jobStage').textContent = JOB.stage;
+  $('#jobSub').textContent = JOB.sub || '';
+  $('#jobBar').style.width = (p * 100).toFixed(1) + '%';
+  $('#jobPct').textContent = (p * 100).toFixed(0) + '%';
+  $('#jobStats').textContent = `${JOB.done} / ${JOB.total}` +
+    (JOB.rate ? ` · ${JOB.rate.toFixed(1)}/s` : '');
+  $('#jobEta').textContent = JOB.done > 2 && eta > 0
+    ? `⏳ ${fmtTime(eta)} baaki · ${fmtTime(el)} beeta`
+    : `⏱ ${fmtTime(el)}`;
+}
+function fmtTime(s) {
+  s = Math.max(0, Math.round(s));
+  if (s < 60) return s + 's';
+  const m = Math.floor(s / 60);
+  return `${m}m ${s % 60}s`;
+}
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 
 /* ============ tabs ============ */
@@ -1394,6 +1438,7 @@ $('#batchClean').onclick = async () => {
   outputs = [];
   const Z = zoneConfig();
   log(`🚀 Batch edge-text removal — ${files.length} file(s) · zone=${Z.mode} ${(Z.pct*100)|0}%`);
+  jobStart(`🧽 Batch text removal`, files.length);
   let totalRegions = 0, cleaned = 0, untouched = 0;
   try {
     await cvReady(); await initOCR();
@@ -1434,8 +1479,10 @@ $('#batchClean').onclick = async () => {
       }
       src.delete(); mask.delete();
       showResults();
+      jobStep(i + 1, f.name);
       await sleep(0);
     }
+    jobEnd('Batch text removal');
     log(`🎉 Batch done — ${cleaned} cleaned (${totalRegions} regions), ${untouched} unchanged`, 'ok');
   } catch (e) { log('✖ ' + e.message, 'err'); console.error(e); }
   finally { $$('.go').forEach(b => b.disabled = false); setProg(0); running = false; }
@@ -1504,8 +1551,18 @@ function upscaleMask(src, size, W, H, out) {
   return dst;
 }
 
+/* RMBG-1.4 ka ONNX graph FIXED 1024x1024 input leta hai — variable size
+   par OrtRun fail ho jaata hai. Isliye model hamesha 1024 par chalta hai.
+   Speed ab in cheezon se aati hai (model size se nahi):
+     • playback capture (seek nahi)
+     • direct canvas->tensor (koi JPEG round-trip nahi)
+     • mask reuse + person-region caching
+     • buffer reuse                                                        */
+const RMBG_SIZE = 1024;
+
 /** ek frame ka alpha — direct tensor, koi blob/encode nahi */
-async function fastFrameAlpha(grabCanvas, W, H, size, outBuf) {
+async function fastFrameAlpha(grabCanvas, W, H, _ignored, outBuf) {
+  const size = RMBG_SIZE;
   const data = canvasToTensor(grabCanvas, size);
   const input = new Tensor('float32', data, [1, 3, size, size]);
   const { output } = await model({ input });
@@ -1590,9 +1647,9 @@ $('#vidStop').onclick = () => { vidAbort = true; log('⏹ stop requested', 'warn
 
 /* presets */
 const VID_PRESETS = {
-  turbo:     { vidQual:'320', vidW:'480', vidFps:'12', vidSkip:'2', vidRegion:'15', vidRate:'3', vidSeek:'play', vidSmooth:'70' },
-  balanced:  { vidQual:'512', vidW:'720', vidFps:'15', vidSkip:'1', vidRegion:'8',  vidRate:'2', vidSeek:'play', vidSmooth:'60' },
-  quality:   { vidQual:'768', vidW:'720', vidFps:'24', vidSkip:'1', vidRegion:'4',  vidRate:'1', vidSeek:'seek', vidSmooth:'50' },
+  turbo:     { vidW:'480', vidFps:'10', vidSkip:'3', vidRegion:'15', vidRate:'3', vidSeek:'play', vidSmooth:'75' },
+  balanced:  { vidW:'720', vidFps:'15', vidSkip:'2', vidRegion:'8',  vidRate:'2', vidSeek:'play', vidSmooth:'60' },
+  quality:   { vidW:'720', vidFps:'24', vidSkip:'1', vidRegion:'4',  vidRate:'1', vidSeek:'play', vidSmooth:'50' },
 };
 document.querySelectorAll('.preset').forEach(b => b.onclick = () => {
   const p = VID_PRESETS[b.dataset.p];
@@ -1703,7 +1760,8 @@ $('#runVideo').onclick = async () => {
 
     const dur = isFinite(v.duration) ? v.duration : 0;
     if (!dur) throw new Error('video duration unknown');
-    const total = Math.max(1, Math.floor(dur * fps));
+    if (!fps || fps < 1) throw new Error('FPS invalid — preset dobara chuno');
+    const total = Math.max(1, Math.round(dur * fps));
     log(`🎬 ${W}x${H} @${fps}fps · ${total} frames · ${mime.split(';')[0]} · bg=${bgMode}`);
 
     const stream = out.captureStream(0);          // manual frame push
@@ -1729,10 +1787,12 @@ $('#runVideo').onclick = async () => {
     rec.start();
 
     v.pause(); v.muted = true;
+    jobStart(`🎬 Video background remove — ${vidFile.name}`, total);
     let prevAlpha = null, lastRaw = null, alphaBuf = null, personRegion = null;
-    const modelSize = +($('#vidQual')?.value || 512);      // 320 / 512 / 768 / 1024
+    let aiFrames = 0;
+    const modelSize = RMBG_SIZE;                          // fixed by model
     const regionEvery = Math.max(1, +($('#vidRegion')?.value || 8));
-    log(`⚙ model input ${modelSize}px · person-region har ${regionEvery} frame`);
+    log(`⚙ AI 1024px (model-fixed) · mask har ${every} frame · person-check har ${regionEvery} frame`);
     const t0 = performance.now();
 
     // playback mode: seeking se 5-10x fast
@@ -1759,6 +1819,7 @@ $('#runVideo').onclick = async () => {
       gx.drawImage(v, 0, 0, W, H);
 
       if (idx % every === 0 || !lastRaw) {
+        aiFrames++;
         // FAST PATH: canvas -> tensor seedha (no JPEG encode/decode round-trip)
         lastRaw = await fastFrameAlpha(grab, W, H, modelSize, alphaBuf);
         alphaBuf = lastRaw;
@@ -1798,7 +1859,8 @@ $('#runVideo').onclick = async () => {
       const el = (performance.now() - t0) / 1000;
       const eta = p > 0.03 ? Math.round(el / p - el) : 0;
       const rate = ((idx + 1) / Math.max(0.001, el)).toFixed(1);
-      setProg(p, `frame ${idx + 1}/${total} · ${(100 * p).toFixed(0)}% · ${rate} fps · ETA ${eta}s`);
+      setProg(p, `frame ${idx + 1}/${total} · ${rate} fps`);
+      jobStep(idx + 1, `frame ${idx + 1} · ${rate} fps · ${aiFrames} AI mask${aiFrames===1?'':'s'} computed`);
       if ((idx & 7) === 0) await sleep(0);        // yield kam, throughput zyada
     }
 
@@ -1822,6 +1884,7 @@ $('#runVideo').onclick = async () => {
        <p><a class="go" href="${url}" download="${name}"
           style="display:inline-block;text-decoration:none">⬇ Download ${name} (${(blob.size/1048576).toFixed(1)} MB)</a></p>`;
     setProg(0);
+    jobEnd(`Video ready — ${name}`);
     const secs = ((performance.now() - t0) / 1000).toFixed(1);
     log(`✅ ready — ${name} · ${(blob.size/1048576).toFixed(1)} MB · ${secs}s · ${(total/secs).toFixed(1)} fps avg`, 'ok');
     if (alpha) log('ℹ Alpha WebM: Chrome, Premiere, DaVinci, CapCut me transparency dikhegi. WhatsApp/Insta alpha support nahi karte — waha green screen mode lo.', 'warn');
@@ -1892,6 +1955,7 @@ async function runAuto() {
   const sens = +$('#sens').value;
   const bgColor = $('#bgSolid').checked ? $('#bgColor').value : null;
 
+  jobStart('⚡ Auto pipeline', files.length);
   log(`🚀 Auto pipeline start — ${files.length} file(s): ${[doClean && 'watermark/text remove', doBg && 'bg remove', 'convert→' + extOf(fmt), doLink && 'link'].filter(Boolean).join(' → ')}`);
 
   try {
@@ -1949,9 +2013,11 @@ async function runAuto() {
       if (workUrl !== f.url) URL.revokeObjectURL(workUrl);
       workCanvas = null;
       setProg(base + step, '');
+      jobStep(i + 1, f.name);
       await sleep(0);
     }
     setProg(0);
+    jobEnd('Auto pipeline');
     log(`🎉 Done — ${outputs.length} file(s) ready. ZIP se sab download kar lo.`, 'ok');
     $('#outwrap').scrollIntoView({ behavior: 'smooth', block: 'nearest' });
   } catch (e) {
@@ -2134,4 +2200,4 @@ addEventListener('beforeunload', () => { try { ocrWorker?.terminate(); } catch(e
 /* warm up in background so first real run is fast */
 addEventListener('load', () => { cvReady().then(() => log('✅ OpenCV engine ready', 'ok')).catch(() => {}); });
 log('👋 Ready. Images drop karo — sab kuch automatically ho jayega.');
-log('🏷 build v12.0-fast · memory-safe · MAX_PIXELS=' + (MAX_PIXELS/1e6).toFixed(0) + 'MP · deviceMemory=' + (navigator.deviceMemory||'?') + 'GB', 'ok');
+log('🏷 build v13.0-stable · memory-safe · MAX_PIXELS=' + (MAX_PIXELS/1e6).toFixed(0) + 'MP · deviceMemory=' + (navigator.deviceMemory||'?') + 'GB', 'ok');
