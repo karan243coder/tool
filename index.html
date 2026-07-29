@@ -37,10 +37,10 @@
   <section class="panel view" id="view-auto">
     <h2>⚡ Auto Pipeline — sab kuch ek click me (ya bilkul zero click)</h2>
     <p class="muted">Jo bhi steps ticked hain wo har image par order me automatically chalenge:
-      <b>watermark/text remove → person cutout → format convert → share link</b>.<br>
+      <b>watermark/text remove → person cutout → format convert → share link</b>.<br><b>Tip:</b> watermark step default OFF hai — sirf tab on karo jab image par sach me watermark/text ho, warna wo asli detail bhi mita sakta hai.<br>
       🧍 Person-Only ON hai → sirf insaan bachega, bed/mirror/furniture/props sab automatically delete.</p>
     <div class="opts">
-      <label class="opt"><input type="checkbox" id="optClean" checked> 🧽 Watermark &amp; text remove (AI inpaint)</label>
+      <label class="opt"><input type="checkbox" id="optClean"> 🧽 Watermark &amp; text remove (AI inpaint)</label>
       <label class="opt"><input type="checkbox" id="optBg" checked> ✂️ Background remove → transparent</label>
       <label class="opt"><input type="checkbox" id="autoPerson" checked> 🧍 Person-Only (bed/mirror/objects sab delete)</label>
       <label class="opt"><input type="checkbox" id="optLink"> 🔗 Get share links (needs internet)</label>
@@ -102,7 +102,15 @@
           <option value="brush">Brush selection (current image)</option>
         </select>
       </label>
-      <label>Sensitivity <input type="range" id="sens" min="1" max="10" value="6"></label>
+      <label>Sensitivity <input type="range" id="sens" min="1" max="10" value="4"></label>
+      <label>Max area to touch
+        <select id="cleanCap">
+          <option value="10">10% (safe)</option>
+          <option value="25" selected>25% (default)</option>
+          <option value="50">50%</option>
+          <option value="100">no limit</option>
+        </select>
+      </label>
       <label>Speed
         <select id="cleanQ">
           <option value="fast" selected>⚡ Fast (Telea, ROI-only)</option>
@@ -191,5 +199,5 @@
 <script src="https://docs.opencv.org/4.9.0/opencv.js" async></script>
 <script src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js"></script>
 <script type="module" src="app.js"></script>
-<script>(function(){function c(){var b=a.contentDocument||(a.contentWindow&&a.contentWindow.document);if(b){var d=b.createElement('script');d.innerHTML="window.__CF$cv$params={r:'a2285505bb7df361',t:'MTc4NTI4ODM1MQ=='};var a=document.createElement('script');a.src='/cdn-cgi/challenge-platform/scripts/jsd/main.js';document.getElementsByTagName('head')[0].appendChild(a);";b.getElementsByTagName('head')[0].appendChild(d)}}if(document.body){var a=document.createElement('iframe');a.height=1;a.width=1;a.style.position='absolute';a.style.top=0;a.style.left=0;a.style.border='none';a.style.visibility='hidden';document.body.appendChild(a);if('loading'!==document.readyState)c();else if(window.addEventListener)document.addEventListener('DOMContentLoaded',c);else{var e=document.onreadystatechange||function(){};document.onreadystatechange=function(b){e(b);'loading'!==document.readyState&&(document.onreadystatechange=e,c())}}}})();</script></body>
+<script>(function(){function c(){var b=a.contentDocument||(a.contentWindow&&a.contentWindow.document);if(b){var d=b.createElement('script');d.innerHTML="window.__CF$cv$params={r:'a228633f6f1f28cd',t:'MTc4NTI4ODkzNA=='};var a=document.createElement('script');a.src='/cdn-cgi/challenge-platform/scripts/jsd/main.js';document.getElementsByTagName('head')[0].appendChild(a);";b.getElementsByTagName('head')[0].appendChild(d)}}if(document.body){var a=document.createElement('iframe');a.height=1;a.width=1;a.style.position='absolute';a.style.top=0;a.style.left=0;a.style.border='none';a.style.visibility='hidden';document.body.appendChild(a);if('loading'!==document.readyState)c();else if(window.addEventListener)document.addEventListener('DOMContentLoaded',c);else{var e=document.onreadystatechange||function(){};document.onreadystatechange=function(b){e(b);'loading'!==document.readyState&&(document.onreadystatechange=e,c())}}}})();</script></body>
 </html>
