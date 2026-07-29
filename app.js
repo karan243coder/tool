@@ -93,7 +93,11 @@ function showResults() {
 }
 /* Bade images (12MP+) browser WASM heap crash karte hain. Kaam se pehle
    safe size par utaar dete hain; final output isi size par save hota hai. */
-const MAX_PIXELS = 12e6;   // ~12MP (4240x2830)
+const MAX_PIXELS = (() => {
+  const mem = navigator.deviceMemory || 4;          // GB, Chrome only
+  const budget = mem >= 8 ? 8e6 : mem >= 4 ? 6e6 : 3e6;
+  return budget;                                     // 8MP / 6MP / 3MP
+})();
 function capCanvas(img) {
   const px = img.width * img.height;
   if (px <= MAX_PIXELS) return img;
@@ -214,20 +218,29 @@ async function personAlpha(url, w, h, opts) {
   const keepNames = new Set([...keep].map(i => PERSON_LABELS[i]));
   const alpha = new Uint8ClampedArray(w * h);
   let hit = 0;
+  // precompute row/col lookup once per mask size (avoids w*h divisions per segment)
+  let cachedW = -1, cachedH = -1, colMap = null, rowMap = null;
   for (const seg of out) {
     if (!keepNames.has(seg.label)) continue;
     hit++;
     const m = seg.mask;                     // RawImage, 1 channel
     const sw = m.width, sh = m.height;
+    if (sw !== cachedW || sh !== cachedH) {
+      colMap = new Int32Array(w); rowMap = new Int32Array(h);
+      for (let x = 0; x < w; x++) colMap[x] = Math.min(sw - 1, (x * sw / w) | 0);
+      for (let y = 0; y < h; y++) rowMap[y] = Math.min(sh - 1, (y * sh / h) | 0);
+      cachedW = sw; cachedH = sh;
+    }
+    const md = m.data;
     for (let y = 0; y < h; y++) {
-      const sy = Math.min(sh - 1, (y * sh / h) | 0);
+      const base = rowMap[y] * sw, orow = y * w;
       for (let x = 0; x < w; x++) {
-        const sx = Math.min(sw - 1, (x * sw / w) | 0);
-        const v = m.data[sy * sw + sx];
-        if (v > 127) alpha[y * w + x] = 255;
+        if (md[base + colMap[x]] > 127) alpha[orow + x] = 255;
       }
     }
+    m.data = null;                          // release each mask asap
   }
+  out.length = 0;
   return { alpha, hit };
 }
 const PERSON_LABELS = ['Background', 'Hat', 'Hair', 'Sunglasses', 'Upper-clothes', 'Skirt',
@@ -267,27 +280,139 @@ async function refineAlpha(alpha, w, h, feather) {
 }
 
 /** Full person cutout: everything except the human is deleted. */
+/* ============ HYBRID PERSON CUTOUT ============
+   Problem: segformer 512px par chalta hai -> patli sleeve, dupatta, dark
+   fabric, baal ke kinare chhoot jaate hain (adhoora cutout).
+   Solution: dono models ko jodo —
+     • segformer  = SEMANTIC "insaan kahan hai" (bed/mirror reject karta hai)
+     • RMBG-1.4   = PRECISE edge/matting (kapde ka har detail pakadta hai)
+   Final alpha = RMBG ka detail, LEKIN sirf person ke region ke andar.
+   Isse object bhi hat jaate hain AUR clothes bhi poore aate hain.        */
+
+/** person region ko fulao taaki chhooti hui clothing bhi ander aa jaye */
+async function dilateRegion(alpha, w, h, growPct) {
+  await cvReady();
+  const m = new cv.Mat(h, w, cv.CV_8U); m.data.set(alpha);
+  const px = Math.max(3, Math.round(Math.min(w, h) * growPct / 100));
+  const k = cv.getStructuringElement(cv.MORPH_ELLIPSE, new cv.Size(px | 1, px | 1));
+  cv.dilate(m, m, k);
+  // holes bhar do (kapdo ke beech ke gaps)
+  const k2 = cv.getStructuringElement(cv.MORPH_ELLIPSE, new cv.Size(15, 15));
+  cv.morphologyEx(m, m, cv.MORPH_CLOSE, k2);
+  const out = new Uint8ClampedArray(m.data);
+  m.delete(); k.delete(); k2.delete();
+  return out;
+}
+
+/** RMBG se full-detail alpha nikalo (matting quality) */
+async function rmbgAlpha(url, w, h) {
+  await initBg();
+  const image = await RawImage.fromURL(url);
+  const { pixel_values } = await processor(image);
+  const { output } = await model({ input: pixel_values });
+  const m = await RawImage.fromTensor(output[0].mul(255).to('uint8')).resize(w, h);
+  const a = new Uint8ClampedArray(w * h);
+  a.set(m.data.subarray(0, w * h));
+  return a;
+}
+
+/** biggest connected blob rakho (mirror reflection / doosre objects hatao) */
+async function keepMainBlobs(alpha, w, h, minFrac) {
+  await cvReady();
+  const m = new cv.Mat(h, w, cv.CV_8U); m.data.set(alpha);
+  const bin = new cv.Mat();
+  cv.threshold(m, bin, 8, 255, cv.THRESH_BINARY);
+  const labels = new cv.Mat(), stats = new cv.Mat(), cent = new cv.Mat();
+  const n = cv.connectedComponentsWithStats(bin, labels, stats, cent);
+  let maxA = 0;
+  for (let i = 1; i < n; i++) maxA = Math.max(maxA, stats.intAt(i, cv.CC_STAT_AREA));
+  const keep = new Uint8Array(n);
+  for (let i = 1; i < n; i++) if (stats.intAt(i, cv.CC_STAT_AREA) >= maxA * minFrac) keep[i] = 1;
+  const out = new Uint8ClampedArray(w * h);
+  const ld = labels.data32S;
+  for (let i = 0; i < w * h; i++) { const l = ld[i]; if (l && keep[l]) out[i] = alpha[i]; }
+  m.delete(); bin.delete(); labels.delete(); stats.delete(); cent.delete();
+  return out;
+}
+
+/** edge ko smooth + slight erode taaki background ka halo na rahe */
+async function polishAlpha(alpha, w, h, feather, shrink) {
+  await cvReady();
+  const m = new cv.Mat(h, w, cv.CV_8U); m.data.set(alpha);
+  if (shrink > 0) {
+    const k = cv.getStructuringElement(cv.MORPH_ELLIPSE, new cv.Size(shrink * 2 + 1, shrink * 2 + 1));
+    cv.erode(m, m, k); k.delete();
+  }
+  if (feather > 0) {
+    const b = 2 * feather + 1;
+    cv.GaussianBlur(m, m, new cv.Size(b, b), 0);
+  }
+  const out = new Uint8ClampedArray(m.data);
+  m.delete();
+  return out;
+}
+
 async function personCutout(url, opts) {
   const img = capCanvas(await loadImg(url));
   const w = img.width, h = img.height;
-  // capped canvas se hi model ko feed karo taaki sizes match rahein
   const feedUrl = img.tagName === 'CANVAS'
     ? await new Promise(r => img.toBlob(b => r(URL.createObjectURL(b)), 'image/jpeg', 0.95))
     : url;
-  let { alpha, hit } = await personAlpha(feedUrl, w, h, opts);
+
+  // ---- step 1: semantic person region ----
+  let { alpha: pAlpha, hit } = await personAlpha(feedUrl, w, h, opts);
+
+  // ---- step 2: precise matting alpha ----
+  let finalAlpha;
   if (!hit) {
-    log('   ⚠ koi person nahi mila — normal AI cutout par fallback', 'warn');
-    return { canvas: await removeBg(url, opts.bgColor), fallback: true };
+    log('   ⚠ person parser ko kuch nahi mila — pure RMBG cutout', 'warn');
+    finalAlpha = await rmbgAlpha(feedUrl, w, h);
+    finalAlpha = await keepMainBlobs(finalAlpha, w, h, 0.10);
+  } else if (opts.mode === 'semantic') {
+    // pure segformer (fastest, but coarse)
+    finalAlpha = await refineAlpha(pAlpha, w, h, opts.feather);
+  } else {
+    const rAlpha = await rmbgAlpha(feedUrl, w, h);
+    // person region ko fulao (clothes jo segformer se chhoot gaye)
+    const region = await dilateRegion(pAlpha, w, h, opts.grow);
+    // intersect: RMBG detail ∩ person region
+    finalAlpha = new Uint8ClampedArray(w * h);
+    let kept = 0, rmbgTotal = 0;
+    for (let i = 0; i < w * h; i++) {
+      if (rAlpha[i] > 8) rmbgTotal++;
+      if (region[i] > 127) { finalAlpha[i] = rAlpha[i]; if (rAlpha[i] > 8) kept++; }
+    }
+    // agar intersect ne bahut kuch kha liya to region bahut tight tha -> RMBG hi lo
+    const ratio = rmbgTotal ? kept / rmbgTotal : 0;
+    if (ratio < 0.45) {
+      log(`   ⚠ region tight tha (${(ratio*100)|0}%) — RMBG detail full use kiya`, 'warn');
+      finalAlpha = rAlpha;
+    }
+    finalAlpha = await keepMainBlobs(finalAlpha, w, h, 0.08);
+    finalAlpha = await polishAlpha(finalAlpha, w, h, opts.feather, opts.shrink);
   }
-  alpha = await refineAlpha(alpha, w, h, opts.feather);
+
+  // ---- step 3: compose ----
   const c = canvasOf(w, h), x = c.getContext('2d');
   const tmp = canvasOf(w, h), tx = tmp.getContext('2d');
   tx.drawImage(img, 0, 0);
   const d = tx.getImageData(0, 0, w, h);
-  for (let i = 0; i < w * h; i++) d.data[4 * i + 3] = alpha[i];
+  const dd = d.data;
+  for (let i = 0; i < w * h; i++) {
+    const a = finalAlpha[i];
+    dd[4 * i + 3] = a;
+    // decontaminate: semi-transparent pixels par background colour bleed hatao
+    if (a > 0 && a < 250) {
+      const f = 255 / Math.max(a, 60);
+      dd[4*i]   = Math.min(255, dd[4*i]   * f * 0.35 + dd[4*i]   * 0.65);
+      dd[4*i+1] = Math.min(255, dd[4*i+1] * f * 0.35 + dd[4*i+1] * 0.65);
+      dd[4*i+2] = Math.min(255, dd[4*i+2] * f * 0.35 + dd[4*i+2] * 0.65);
+    }
+  }
   tx.putImageData(d, 0, 0);
   if (opts.bgColor) { x.fillStyle = opts.bgColor; x.fillRect(0, 0, w, h); }
   x.drawImage(tmp, 0, 0);
+  if (feedUrl !== url) URL.revokeObjectURL(feedUrl);
   return { canvas: c, fallback: false };
 }
 
@@ -300,6 +425,9 @@ async function cutout(url) {
       keepAccessories: $('#keepAcc').checked,
       keepBag: $('#keepBag').checked,
       feather: +$('#feather').value,
+      grow: +($('#grow')?.value || 4),
+      shrink: +($('#shrink')?.value || 0),
+      mode: $('#cutMode')?.value || 'hybrid',
     });
     return r.canvas;
   }
@@ -571,7 +699,10 @@ $('#runVideo').onclick = async () => {
 
   try {
     await cvReady();
-    await ($('#personOnly').checked ? initParser() : initBg());
+    if ($('#personOnly').checked) {
+      await initParser();
+      if (($('#cutMode')?.value || 'hybrid') !== 'semantic') await initBg();
+    } else await initBg();
 
     const scale = maxW ? Math.min(1, maxW / v.videoWidth) : 1;
     const W = Math.round(v.videoWidth * scale) & ~1;
@@ -612,9 +743,15 @@ $('#runVideo').onclick = async () => {
       if (idx % every === 0 || !lastAlpha) {
         const url = grab.toDataURL('image/jpeg', 0.9);
         if ($('#personOnly').checked) {
-          const r = await personAlpha(url, W, H, {
-            keepAccessories: $('#keepAcc').checked, keepBag: $('#keepBag').checked });
-          lastAlpha = r.hit ? await refineAlpha(r.alpha, W, H, +$('#feather').value) : lastAlpha;
+          const cc = await personCutout(url, {
+            bgColor: null,
+            keepAccessories: $('#keepAcc').checked, keepBag: $('#keepBag').checked,
+            feather: +$('#feather').value, grow: +($('#grow')?.value || 4),
+            shrink: +($('#shrink')?.value || 0), mode: $('#cutMode')?.value || 'hybrid' });
+          const dd = cc.canvas.getContext('2d').getImageData(0, 0, W, H);
+          const a2 = new Uint8ClampedArray(W * H);
+          for (let i = 0; i < W * H; i++) a2[i] = dd.data[4 * i + 3];
+          lastAlpha = a2;
         } else {
           const c = await removeBg(url, null);
           const d = c.getContext('2d').getImageData(0, 0, W, H);
@@ -724,7 +861,13 @@ async function runAuto() {
   log(`🚀 Auto pipeline start — ${files.length} file(s): ${[doClean && 'watermark/text remove', doBg && 'bg remove', 'convert→' + extOf(fmt), doLink && 'link'].filter(Boolean).join(' → ')}`);
 
   try {
-    if (doBg) { await cvReady(); await ($('#personOnly').checked ? initParser() : initBg()); }
+    if (doBg) {
+      await cvReady();
+      if ($('#personOnly').checked) {
+        await initParser();
+        if (($('#cutMode')?.value || 'hybrid') !== 'semantic') await initBg();
+      } else await initBg();
+    }
     if (doClean) { log('… OpenCV load'); await cvReady(); log('✅ OpenCV ready', 'ok'); }
 
     for (let i = 0; i < files.length; i++) {
@@ -781,6 +924,12 @@ async function runAuto() {
 }
 $('#runAuto').onclick = runAuto;
 
+/* live slider values */
+[['grow','%'],['shrink',''],['feather','']].forEach(([id,suf])=>{
+  const el=$('#'+id), out=$('#'+id+'V');
+  if(el&&out){ const u=()=>out.textContent=el.value+suf; el.oninput=u; u(); }
+});
+
 /* keep the two Person-Only toggles in sync */
 const pA = $('#autoPerson'), pB = $('#personOnly');
 pA.onchange = () => { pB.checked = pA.checked; };
@@ -806,7 +955,10 @@ $('#runBg').onclick = async () => {
   running = true; $$('.go').forEach(b => b.disabled = true); outputs = [];
   try {
     await cvReady();
-    await ($('#personOnly').checked ? initParser() : initBg());
+    if ($('#personOnly').checked) {
+      await initParser();
+      if (($('#cutMode')?.value || 'hybrid') !== 'semantic') await initBg();
+    } else await initBg();
     for (let i = 0; i < files.length; i++) {
       setProg((i + 0.5) / files.length, files[i].name);
       log(`✂️ ${files[i].name}`);
@@ -911,3 +1063,4 @@ $('#copyAll').onclick = () => {
 /* warm up in background so first real run is fast */
 addEventListener('load', () => { cvReady().then(() => log('✅ OpenCV engine ready', 'ok')).catch(() => {}); });
 log('👋 Ready. Images drop karo — sab kuch automatically ho jayega.');
+log('🏷 build v4.0-hybrid · memory-safe · MAX_PIXELS=' + (MAX_PIXELS/1e6).toFixed(0) + 'MP · deviceMemory=' + (navigator.deviceMemory||'?') + 'GB', 'ok');
