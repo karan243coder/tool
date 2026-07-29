@@ -60,3 +60,8 @@ footer{text-align:center;color:#8b949e;font-size:12px;padding:20px}
 .tips{background:#0d1117;border-left:3px solid #3fb950;padding:10px 14px;border-radius:8px;
   font-size:12.5px;color:#8b949e;line-height:1.9;margin:10px 0}
 .tips b{color:#e6edf3}
+
+#vidDrop{padding:34px 20px}
+#vidDrop button{margin-top:10px}
+#vidStage{margin-top:14px}
+#vidPreview{border:1px solid #30363d}
