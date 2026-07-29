@@ -1647,9 +1647,9 @@ $('#vidStop').onclick = () => { vidAbort = true; log('⏹ stop requested', 'warn
 
 /* presets */
 const VID_PRESETS = {
-  turbo:     { vidW:'480', vidFps:'10', vidSkip:'3', vidRegion:'15', vidRate:'3', vidSeek:'play', vidSmooth:'75' },
-  balanced:  { vidW:'720', vidFps:'15', vidSkip:'2', vidRegion:'8',  vidRate:'2', vidSeek:'play', vidSmooth:'60' },
-  quality:   { vidW:'720', vidFps:'24', vidSkip:'1', vidRegion:'4',  vidRate:'1', vidSeek:'play', vidSmooth:'50' },
+  turbo:     { vidW:'480', vidFps:'10', vidSkip:'3', vidRegion:'15', vidRate:'1', vidSeek:'seek', vidSmooth:'75' },
+  balanced:  { vidW:'720', vidFps:'15', vidSkip:'2', vidRegion:'8',  vidRate:'1', vidSeek:'seek', vidSmooth:'60' },
+  quality:   { vidW:'720', vidFps:'24', vidSkip:'1', vidRegion:'4',  vidRate:'1', vidSeek:'seek', vidSmooth:'50' },
 };
 document.querySelectorAll('.preset').forEach(b => b.onclick = () => {
   const p = VID_PRESETS[b.dataset.p];
@@ -1671,28 +1671,40 @@ function pickMime(alpha) {
    Agar rVFC available ho to video ko PLAY karke frames pump karte hain —
    decoder sequential decode karta hai = 5-10x fast.                      */
 function makeFramePump(v, fps) {
-  const has = 'requestVideoFrameCallback' in v;
-  if (!has) return null;
-  let queue = [], waiting = null, lastT = -1;
+  /* CRITICAL FIX: pehle wala pump video ko real-time chalne deta tha jabki
+     AI har frame par ~250ms leta hai. 6.8s video 6.8s me khatam, hum sirf
+     27 frames pakad paate the -> output 1-2 sec ka.  (83% frames gayab)
+
+     Ab: har frame lene ke baad video PAUSE hoti hai. Process complete hone
+     par hi agla frame maanga jaata hai. Ek bhi frame miss nahi hota. */
+  if (!('requestVideoFrameCallback' in v)) return null;
+  let pending = null, lastT = -1, ended = false;
   const step = 1 / fps;
-  const onFrame = (now, meta) => {
-    const t = meta.mediaTime;
-    if (t - lastT >= step * 0.85) {          // dedupe: har fps-slot ka ek frame
+  v.addEventListener('ended', () => { ended = true; if (pending) { const p = pending; pending = null; p(null); } });
+
+  const arm = () => {
+    v.requestVideoFrameCallback((now, meta) => {
+      const t = meta.mediaTime;
+      if (t - lastT < step * 0.9 && lastT >= 0) { arm(); return; }   // dedupe
       lastT = t;
-      if (waiting) { const w = waiting; waiting = null; w(t); }
-      else queue.push(t);
-    }
-    if (!v.paused && !v.ended) v.requestVideoFrameCallback(onFrame);
+      v.pause();                                   // ROKO — process hone tak
+      if (pending) { const p = pending; pending = null; p(t); }
+    });
   };
-  v.requestVideoFrameCallback(onFrame);
+
   return {
-    next: () => new Promise(res => {
-      if (queue.length) return res(queue.shift());
-      if (v.ended) return res(null);
-      waiting = res;
-      setTimeout(() => { if (waiting === res) { waiting = null; res(v.ended ? null : v.currentTime); } }, 900);
-    }),
-    stop: () => { queue = []; waiting = null; },
+    async next() {
+      if (ended || v.ended) return null;
+      return new Promise(res => {
+        pending = res;
+        arm();
+        v.play().catch(() => {});                  // ek frame aage badho
+        setTimeout(() => {
+          if (pending === res) { pending = null; res(v.ended ? null : v.currentTime); }
+        }, 2000);
+      });
+    },
+    stop() { pending = null; try { v.pause(); } catch (e) {} },
   };
 }
 
@@ -1700,13 +1712,16 @@ function makeFramePump(v, fps) {
 function seekTo(v, t) {
   return new Promise(res => {
     let done = false;
-    const finish = () => { if (!done) { done = true; res(); } };
+    const finish = () => { if (!done) { done = true; v.onseeked = null; res(); } };
     if ('requestVideoFrameCallback' in v) {
+      // rVFC = pakka frame decode ho chuka hai
       v.requestVideoFrameCallback(() => finish());
+      v.onseeked = () => setTimeout(finish, 30);
+    } else {
+      v.onseeked = () => setTimeout(finish, 10);
     }
-    v.onseeked = () => setTimeout(finish, 0);
-    v.currentTime = t;
-    setTimeout(finish, 400);                    // safety timeout
+    try { v.currentTime = t; } catch (e) { finish(); }
+    setTimeout(finish, 1200);              // safety (pehle 400 tha — chhote videos par jaldi cut)
   });
 }
 
@@ -1890,7 +1905,7 @@ $('#runVideo').onclick = async () => {
     const t0 = performance.now();
 
     // playback mode: seeking se 5-10x fast
-    const usePump = ($('#vidSeek')?.value || 'play') === 'play' && 'requestVideoFrameCallback' in v;
+    const usePump = ($('#vidSeek')?.value || 'seek') === 'play' && 'requestVideoFrameCallback' in v;
     let pump = null;
     if (usePump) {
       v.currentTime = 0;
@@ -1903,11 +1918,17 @@ $('#runVideo').onclick = async () => {
     }
 
     for (let idx = 0; idx < total && !vidAbort; idx++) {
+      const wantT = Math.min(idx / fps, Math.max(0, dur - 0.001));
       if (pump) {
         const t = await pump.next();
-        if (t === null) { log(`   video khatam ${idx} frames par`); break; }
+        if (t === null) {
+          // stream khatam — baaki frames seek se lo (kabhi adhoora output nahi)
+          log(`   pump end @${idx} — baaki ${total - idx} frames seek se`, 'warn');
+          pump.stop(); pump = null;
+          await seekTo(v, wantT);
+        }
       } else {
-        await seekTo(v, Math.min(idx / fps, Math.max(0, dur - 0.01)));
+        await seekTo(v, wantT);
       }
       gx.clearRect(0, 0, W, H);
       gx.drawImage(v, 0, 0, W, H);
@@ -1955,11 +1976,18 @@ $('#runVideo').onclick = async () => {
       const eta = p > 0.03 ? Math.round(el / p - el) : 0;
       const rate = ((idx + 1) / Math.max(0.001, el)).toFixed(1);
       setProg(p, `frame ${idx + 1}/${total} · ${rate} fps`);
-      jobStep(idx + 1, `frame ${idx + 1} · ${rate} fps · ${aiFrames} AI mask${aiFrames===1?'':'s'} computed`);
+      jobStep(idx + 1, `frame ${idx + 1}/${total} · ${rate} fps · ${aiFrames} AI masks · out ${((idx+1)/fps).toFixed(1)}s`);
       if ((idx & 7) === 0) await sleep(0);        // yield kam, throughput zyada
     }
 
     if (pump) { pump.stop(); v.pause(); }
+
+    // GUARD: agar frames kam pade to saaf batao (chup-chaap chhoti video nahi)
+    const wrote = enc ? enc.frames : total;
+    if (!vidAbort && wrote < total * 0.95) {
+      log(`⚠ sirf ${wrote}/${total} frames encode hue (${(100*wrote/total)|0}%) — ` +
+          `output ${(wrote/fps).toFixed(1)}s banega, source ${dur.toFixed(1)}s`, 'warn');
+    }
 
     let blob;
     if (enc) {
@@ -1988,9 +2016,11 @@ $('#runVideo').onclick = async () => {
     jobEnd(`Video ready — ${name}`);
     const secs = ((performance.now() - t0) / 1000).toFixed(1);
     const outDur = (enc ? enc.frames / fps : +secs);
+    const framePct = enc ? (100 * enc.frames / total).toFixed(0) : '?';
     log(`✅ ready — ${name} · ${(blob.size/1048576).toFixed(1)} MB`, 'ok');
-    log(`   ⏱ output duration ${outDur.toFixed(1)}s (source ${dur.toFixed(1)}s) · processing ${secs}s · ${(total/secs).toFixed(1)} fps`,
-        Math.abs(outDur - dur) < 1.0 ? 'ok' : 'warn');
+    log(`   ⏱ output ${outDur.toFixed(1)}s / source ${dur.toFixed(1)}s · ` +
+        `${enc ? enc.frames : '?'}/${total} frames (${framePct}%) · processing ${secs}s`,
+        Math.abs(outDur - dur) < 0.6 ? 'ok' : 'warn');
     if (alpha) log('ℹ Alpha WebM: Chrome, Premiere, DaVinci, CapCut me transparency dikhegi. WhatsApp/Insta alpha support nahi karte — waha green screen mode lo.', 'warn');
   } catch (e) {
     console.error(e); log('✖ video error: ' + e.message, 'err'); setProg(0);
@@ -2304,4 +2334,4 @@ addEventListener('beforeunload', () => { try { ocrWorker?.terminate(); } catch(e
 /* warm up in background so first real run is fast */
 addEventListener('load', () => { cvReady().then(() => log('✅ OpenCV engine ready', 'ok')).catch(() => {}); });
 log('👋 Ready. Images drop karo — sab kuch automatically ho jayega.');
-log('🏷 build v14.0-exact · memory-safe · MAX_PIXELS=' + (MAX_PIXELS/1e6).toFixed(0) + 'MP · deviceMemory=' + (navigator.deviceMemory||'?') + 'GB', 'ok');
+log('🏷 build v15.0-allframes · memory-safe · MAX_PIXELS=' + (MAX_PIXELS/1e6).toFixed(0) + 'MP · deviceMemory=' + (navigator.deviceMemory||'?') + 'GB', 'ok');
