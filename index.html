@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta http-equiv="Cache-Control" content="no-cache, must-revalidate">
 <title>PixelFree — AI Image Toolkit (100% Free, Fully Automatic)</title>
-<link rel="stylesheet" href="style.css?v9.0">
+<link rel="stylesheet" href="style.css?v10.0">
 </head>
 <body>
 <header>
@@ -97,10 +97,10 @@
       <label><input type="checkbox" id="dbgMask"> 🐞 Debug mask dikhao</label>
     </div>
     <div class="tips">
-      <b>Workflow:</b> 🔍 Scan → thumbnails dekho → tick karo → 🗑 Remove selected<br>
-      <b>Kuch nahi mila?</b> → OCR confidence <b>30</b>, Detect depth <b>Deep</b>, phir Scan<br>
-      <b>Aankh/skin list me aaya?</b> → uska tick hata do — wo chhua bhi nahi jayega<br>
-      <b>OCR miss kar raha?</b> → <b>Brush mode</b> me khud paint karke Remove
+      <b>Seedha ye karo:</b> saari photos drop → <b>⚡ Sab photos ka edge-text hatao</b> → ZIP download<br>
+      <b>Text zone se bahar hai?</b> → Zone width badhao (30-40%)<br>
+      <b>Center me kuch hat raha?</b> → ho hi nahi sakta, center locked hai ✓<br>
+      <b>Ek photo check karni hai?</b> → 🔍 Scan &amp; review se thumbnails dekho
     </div>
     <div class="row">
       <label><input type="checkbox" id="bgSolid"> Solid colour ke saath replace karo <input type="color" id="bgColor" value="#ffffff"></label>
@@ -121,14 +121,14 @@
   <section class="panel view hidden" id="view-clean">
     <h2>AI Watermark / Text Remover (batch inpainting)</h2>
     <p class="muted">
-      <b>🛑 Ab kuch bhi apne aap nahi hatta.</b> Pehle <b>Scan</b> karo — har detection ka
-      crop thumbnail dikhega text, confidence aur skin-% ke saath. Aap tick karke decide
-      karo, tabhi hatega. Aankh ya skin galti se kabhi nahi hategi.<br>
-      <b>⚠ Risky candidates default OFF</b> — jinme skin &gt;40%, confidence &lt;60%, ya
-      graphic detection ho. Unpe laal warning dikhta hai.<br>
-      <b>Strict OCR filter:</b> kam se kam <b>2 letters</b> chahiye aur aadhe se zyada
-      alphanumeric — single symbol/noise (jo aankh par match hota tha) reject.<br>
-      <b>🔒 Pixel-exact:</b> sirf approve kiye text ke stroke pixels badalte hain.
+      <b>📍 Edge-zone mode:</b> aapke photos me text hamesha <b>left/right kinare</b> par hota hai
+      aur chehra beech me. Isliye ab detection <b>sirf kinare ke band</b> me hoti hai —
+      <b>center zone poori tarah LOCKED</b> hai. Wahan ka ek bhi pixel kabhi nahi badlega.
+      Aankh center me hoti hai, isliye ab wo chhui hi nahi ja sakti.<br>
+      <b>⚡ Batch button:</b> saari photos ek saath — pattern fix hai isliye safe hai.
+      Jis photo me kuch na mile wo <b>bilkul original</b> rehti hai (koi re-encode nahi).<br>
+      <b>👁 Preview me</b> center kaala dikhega (locked) aur kinare hare box me (active).<br>
+      <b>🔒 Pixel-exact:</b> sirf text ke stroke pixels badalte hain, typically 0.1-1%.
     </p>
     <div class="row">
       <label>Mode
@@ -137,6 +137,16 @@
           <option value="brush">Brush selection (current image)</option>
         </select>
       </label>
+      <label>📍 Text zone
+        <select id="zoneMode">
+          <option value="both" selected>Left + Right kinare</option>
+          <option value="left">Sirf Left</option>
+          <option value="right">Sirf Right</option>
+          <option value="off">Poori image (risky)</option>
+        </select>
+      </label>
+      <label>Zone width <input type="range" id="zoneWidth" min="8" max="45" value="22">
+        <small class="hint" id="zoneWidthV">22%</small></label>
       <label>Detection
         <select id="detMethod">
           <option value="ocr" selected>🔤 OCR (asli text padhta hai — safest)</option>
@@ -187,8 +197,11 @@
       <b>Sabse safe tareeka</b> → Brush mode: sirf jo aap paint karo wahi hatega
     </div>
     <div class="row">
-      <button class="go" id="scanBtn">🔍 1. Scan — kya mila dekho</button>
-      <button class="ghost" id="previewClean">👁 Overlay preview</button>
+      <button class="go" id="batchClean">⚡ Sab photos ka edge-text hatao (batch)</button>
+    </div>
+    <div class="row">
+      <button class="ghost" id="scanBtn">🔍 Scan &amp; review (ek photo)</button>
+      <button class="ghost" id="previewClean">👁 Zone + overlay preview</button>
     </div>
 
     <div id="reviewBar" class="hidden">
@@ -287,6 +300,6 @@
 <script src="https://docs.opencv.org/4.9.0/opencv.js" async></script>
 <script src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/tesseract.js@5.1.1/dist/tesseract.min.js"></script>
-<script type="module" src="app.js?v9.0"></script>
+<script type="module" src="app.js?v10.0"></script>
 </body>
 </html>
