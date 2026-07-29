@@ -903,9 +903,13 @@ async function ocrBoxes(canvas, minConf, level) {
     const sc = invF / v.up;
     for (const w of (data.words || [])) {
       const t = (w.text || '').trim();
-      if (!t || t.length < 1) continue;
+      if (!t) continue;
       if (w.confidence < minConf) continue;
-      if (!/[A-Za-z0-9@#©®™.\-_/]/.test(t)) continue;     // garbage reject
+      // STRICT: asli word chahiye. Single char / symbol-only = aankh-jaisa noise.
+      const alnum = (t.match(/[A-Za-z0-9]/g) || []).length;
+      if (alnum < 2) continue;                       // kam se kam 2 letters
+      if (alnum / t.length < 0.5) continue;          // aadhe se zyada garbage
+      if (/^[^A-Za-z0-9]*$/.test(t)) continue;
       const bb = w.bbox;
       all.push({
         x: Math.round(bb.x0 * sc), y: Math.round(bb.y0 * sc),
@@ -931,6 +935,10 @@ async function ocrBoxes(canvas, minConf, level) {
 /* ---------- GRAPHIC / LOGO WATERMARK DETECTION ----------
    Text ke alawa logo, symbol, semi-transparent overlay pakadta hai.
    Repeating-pattern + uniform-alpha regions dhoondta hai.                */
+/* Graphic/logo watermark detector.
+   IMPORTANT: ye blind edge-density detector hai jo aankh/skin ko bhi pakad
+   sakta hai. Isliye ye ab AUTO-APPLY kabhi nahi hota — sirf REVIEW list me
+   candidate deta hai jise user khud approve karta hai.                    */
 function graphicWatermarkBoxes(src, strength) {
   const boxes = [];
   const gray = new cv.Mat(), blur = new cv.Mat(), diff = new cv.Mat(), th = new cv.Mat();
@@ -938,7 +946,7 @@ function graphicWatermarkBoxes(src, strength) {
   const sc = Math.max(1, Math.round(Math.min(src.cols, src.rows) / 500));
   cv.GaussianBlur(gray, blur, new cv.Size(0, 0), 4 * sc);
   cv.absdiff(gray, blur, diff);
-  cv.threshold(diff, th, Math.max(4, 14 - strength), 255, cv.THRESH_BINARY);
+  cv.threshold(diff, th, Math.max(6, 18 - strength), 255, cv.THRESH_BINARY);
   const k = cv.getStructuringElement(cv.MORPH_ELLIPSE, new cv.Size(7 * sc, 7 * sc));
   cv.morphologyEx(th, th, cv.MORPH_CLOSE, k);
   const c = new cv.MatVector(), h = new cv.Mat();
@@ -946,10 +954,11 @@ function graphicWatermarkBoxes(src, strength) {
   const area = src.rows * src.cols;
   for (let i = 0; i < c.size(); i++) {
     const r = cv.boundingRect(c.get(i));
-    const a = r.width * r.height;
-    if (a < 300 * sc * sc || a > area * 0.2) continue;
-    const roi = th.roi(r); const d = cv.countNonZero(roi) / a; roi.delete();
-    if (d > 0.22) boxes.push({ x: r.x, y: r.y, w: r.width, h: r.height, text: '[graphic]', conf: 0, via: 'graphic' });
+    const a2 = r.width * r.height;
+    if (a2 < 400 * sc * sc || a2 > area * 0.12) continue;
+    const roi = th.roi(r); const d = cv.countNonZero(roi) / a2; roi.delete();
+    if (d > 0.28) boxes.push({ x: r.x, y: r.y, w: r.width, h: r.height,
+      text: '[graphic]', conf: 0, via: 'graphic', needsReview: true });
   }
   gray.delete(); blur.delete(); diff.delete(); th.delete(); k.delete(); c.delete(); h.delete();
   return boxes;
@@ -1022,20 +1031,36 @@ async function ocrMask(src, canvas, opts) {
   const used = [];
   let skipFace = 0, skipSize = 0;
 
-  const prot = opts.protectFace ? faceProtectMask(src) : null;
+  // skin reference (naapne ke liye, blanket-reject ke liye nahi)
+  let skinRef = null;
+  if (opts.protectFace) {
+    const small = new cv.Mat();
+    const f = Math.min(1, 800 / Math.max(src.cols, src.rows));
+    if (f < 1) cv.resize(src, small, new cv.Size(Math.round(src.cols*f), Math.round(src.rows*f)), 0,0, cv.INTER_AREA);
+    else src.copyTo(small);
+    const sm = skinMask(small);
+    skinRef = new cv.Mat();
+    cv.resize(sm, skinRef, new cv.Size(src.cols, src.rows), 0, 0, cv.INTER_NEAREST);
+    sm.delete(); small.delete();
+  }
+  const prot = null;
 
   for (const b of boxes) {
     const ba = b.w * b.h;
     if (ba < 20 || ba > area * 0.45) { skipSize++; continue; }
-    if (prot) {
+    // skin overlap naapo (reject nahi karte — review me flag karte hain)
+    let skinFrac = 0;
+    if (skinRef) {
       const rx = Math.max(0, b.x), ry = Math.max(0, b.y);
       const rw = Math.min(src.cols - rx, b.w), rh = Math.min(src.rows - ry, b.h);
       if (rw > 1 && rh > 1) {
-        const pr = prot.roi(new cv.Rect(rx, ry, rw, rh));
-        const sf = cv.countNonZero(pr) / (rw * rh); pr.delete();
-        if (sf > 0.35) { skipFace++; continue; }
+        const pr = skinRef.roi(new cv.Rect(rx, ry, rw, rh));
+        skinFrac = cv.countNonZero(pr) / (rw * rh); pr.delete();
       }
     }
+    b.skin = Math.round(skinFrac * 100);
+    // AUTO mode me skin-heavy + low-conf candidate chhod do (ye aankh hoti hai)
+    if (!opts.reviewMode && skinFrac > 0.5 && b.conf < 70) { skipFace++; continue; }
     const pad = Math.max(3, Math.round(b.h * 0.22));
     const sm = strokeMaskInBox2(src, b, pad, opts.aggressive);
     if (!sm) continue;
@@ -1043,12 +1068,10 @@ async function ocrMask(src, canvas, opts) {
     cv.bitwise_or(dstRoi, sm.mat, dstRoi);
     dstRoi.delete(); sm.mat.delete();
     used.push({ x: sm.rect.x, y: sm.rect.y, w: sm.rect.width, h: sm.rect.height,
-                text: b.text, conf: b.conf, via: b.via });
+                text: b.text, conf: b.conf, via: b.via, skin: b.skin || 0,
+                needsReview: b.needsReview || (b.skin > 40) || b.conf < 60 });
   }
-  if (prot) {
-    const inv = new cv.Mat(); cv.bitwise_not(prot, inv);
-    cv.bitwise_and(mask, inv, mask); inv.delete(); prot.delete();
-  }
+  if (skinRef) skinRef.delete();
   mask.__boxes = used;
   mask.__count = used.length;
   mask.__words = used.map(u => u.text);
@@ -1174,6 +1197,134 @@ async function cleanImage(url, sens, brushMask, opts_preview) {
   return { canvas: work, pct, covered, ms: Math.round(performance.now() - t0),
            boxes: totalBoxes, words: allWords, skipped };
 }
+
+/* ================= REVIEW-FIRST WORKFLOW =================
+   Ab kuch bhi blindly nahi hatta. Scan karo -> har candidate ka crop dikhao
+   -> user tick kare -> tabhi remove ho. Aankh/skin galti se nahi hategi.  */
+let reviewState = null;   // {url, cands:[{...box, on:bool, thumb:dataURL}]}
+
+async function scanCandidates(url) {
+  await cvReady();
+  const img = capCanvas(await loadImg(url));
+  const c = canvasOf(img.width, img.height);
+  c.getContext('2d').drawImage(img, 0, 0);
+  const src = cv.imread(c);
+  const method = $('#detMethod')?.value || 'ocr';
+
+  let mask;
+  if (method === 'ocr') {
+    mask = await ocrMask(src, c, {
+      minConf: +($('#ocrConf')?.value || 45),
+      protectFace: $('#protectFace')?.checked ?? true,
+      level: +($('#ocrLevel')?.value || 2),
+      aggressive: false,
+      graphic: $('#detGraphic')?.checked,
+      gstrength: +($('#sens')?.value || 5),
+      reviewMode: true,
+    });
+  } else {
+    mask = autoMask(src, +($('#sens')?.value || 4));
+  }
+  const cands = (mask.__boxes || []).map((b, i) => {
+    const pad = 6;
+    const x = Math.max(0, b.x - pad), y = Math.max(0, b.y - pad);
+    const w = Math.min(c.width - x, b.w + 2 * pad), h = Math.min(c.height - y, b.h + 2 * pad);
+    const tc = canvasOf(Math.max(40, Math.min(220, w)), Math.max(28, Math.min(120, h * (Math.min(220, w) / Math.max(1, w)))));
+    tc.getContext('2d').drawImage(c, x, y, w, h, 0, 0, tc.width, tc.height);
+    // skin-heavy ya low-conf default OFF — user chahe to on kare
+    const risky = (b.skin || 0) > 40 || (b.conf || 0) < 60 || b.via === 'graphic';
+    return { ...b, id: i, on: !risky, thumb: tc.toDataURL('image/jpeg', 0.75), risky };
+  });
+  src.delete(); mask.delete();
+  reviewState = { url, canvas: c, cands };
+  return cands;
+}
+
+function renderReview() {
+  const box = $('#reviewList');
+  if (!reviewState) { box.innerHTML = ''; return; }
+  const cs = reviewState.cands;
+  if (!cs.length) {
+    box.innerHTML = `<p class="muted">Koi candidate nahi mila. OCR confidence ghatao ya Brush mode use karo.</p>`;
+    $('#reviewBar').classList.add('hidden'); return;
+  }
+  const onCount = cs.filter(c => c.on).length;
+  $('#reviewBar').classList.remove('hidden');
+  $('#reviewCount').textContent = `${onCount}/${cs.length} selected`;
+  box.innerHTML = cs.map(c => `
+    <label class="rcard ${c.on ? 'on' : ''} ${c.risky ? 'risky' : ''}">
+      <input type="checkbox" data-id="${c.id}" ${c.on ? 'checked' : ''}>
+      <img src="${c.thumb}">
+      <div class="rtxt">${c.text === '[graphic]' ? '🎨 graphic' : '“' + c.text + '”'}</div>
+      <div class="rmeta">conf ${c.conf}% ${c.skin ? `· skin ${c.skin}%` : ''}</div>
+      ${c.risky ? '<div class="rwarn">⚠ skin/low-conf — khud check karo</div>' : ''}
+    </label>`).join('');
+  box.querySelectorAll('input').forEach(inp => inp.onchange = () => {
+    reviewState.cands[+inp.dataset.id].on = inp.checked;
+    renderReview();
+  });
+}
+
+$('#scanBtn').onclick = async () => {
+  if (!files.length) return alert('Pehle images add karo');
+  $$('.go').forEach(b => b.disabled = true);
+  try {
+    log(`🔍 Scanning ${files[current].name}…`);
+    const cs = await scanCandidates(files[current].url);
+    renderReview();
+    const risky = cs.filter(c => c.risky).length;
+    log(`🔍 ${cs.length} candidate mile · ${cs.filter(c=>c.on).length} auto-selected · ${risky} risky (skin/low-conf, default OFF)`,
+        cs.length ? 'ok' : 'warn');
+    log('   👉 List me check karke decide karo, phir "Remove selected" dabao');
+  } catch (e) { log('✖ ' + e.message, 'err'); console.error(e); }
+  finally { $$('.go').forEach(b => b.disabled = false); setProg(0); }
+};
+
+$('#selAll').onclick = () => { reviewState?.cands.forEach(c => c.on = true); renderReview(); };
+$('#selNone').onclick = () => { reviewState?.cands.forEach(c => c.on = false); renderReview(); };
+$('#selSafe').onclick = () => { reviewState?.cands.forEach(c => c.on = !c.risky); renderReview(); };
+
+$('#removeSel').onclick = async () => {
+  if (!reviewState) return alert('Pehle Scan karo');
+  const on = reviewState.cands.filter(c => c.on);
+  if (!on.length) return alert('Koi region selected nahi');
+  $$('.go').forEach(b => b.disabled = true);
+  try {
+    await cvReady();
+    const c = reviewState.canvas;
+    const src = cv.imread(c);
+    const mask = cv.Mat.zeros(src.rows, src.cols, cv.CV_8U);
+    for (const b of on) {
+      const sm = strokeMaskInBox2(src, b, Math.max(3, Math.round(b.h * 0.2)), false);
+      if (!sm) continue;
+      const d = mask.roi(sm.rect);
+      cv.bitwise_or(d, sm.mat, d);
+      d.delete(); sm.mat.delete();
+    }
+    mask.__count = on.length;
+    const rgb = new cv.Mat(); cv.cvtColor(src, rgb, cv.COLOR_RGBA2RGB);
+    const dst = smartInpaint(rgb, mask, $('#cleanQ')?.value || 'fast');
+    const soft = new cv.Mat(); mask.copyTo(soft);
+    cv.GaussianBlur(soft, soft, new cv.Size(3, 3), 0);
+    const outC = composeExact(c, dst, soft);
+    const changed = outC.__changed || 0;
+    const pct = (100 * changed / (c.width * c.height)).toFixed(2);
+
+    outputs = [];
+    pushOut(files[current].name + '-clean', await toBlob(outC, 'image/png'), 'png');
+    showResults();
+    log(`✅ ${on.length} region hataye · sirf ${pct}% pixels badle · baaki 100% original`, 'ok');
+    // preview refresh with result
+    const ec2 = $('#editCanvas'), mc2 = $('#maskCanvas');
+    const scl = Math.min(1, 880 / outC.width);
+    ec2.width = mc2.width = Math.round(outC.width * scl);
+    ec2.height = mc2.height = Math.round(outC.height * scl);
+    ec2.getContext('2d').drawImage(outC, 0, 0, ec2.width, ec2.height);
+    mc2.getContext('2d').clearRect(0, 0, mc2.width, mc2.height);
+    src.delete(); mask.delete(); rgb.delete(); dst.delete(); soft.delete();
+  } catch (e) { log('✖ ' + e.message, 'err'); console.error(e); }
+  finally { $$('.go').forEach(b => b.disabled = false); setProg(0); }
+};
 
 /* ============ convert / resize ============ */
 async function convertCanvas(srcCanvasOrImg, fmt, q, maxw, whitebg) {
@@ -1637,4 +1788,5 @@ addEventListener('beforeunload', () => { try { ocrWorker?.terminate(); } catch(e
 /* warm up in background so first real run is fast */
 addEventListener('load', () => { cvReady().then(() => log('✅ OpenCV engine ready', 'ok')).catch(() => {}); });
 log('👋 Ready. Images drop karo — sab kuch automatically ho jayega.');
-log('🏷 build v8.0-multipass · memory-safe · MAX_PIXELS=' + (MAX_PIXELS/1e6).toFixed(0) + 'MP · deviceMemory=' + (navigator.deviceMemory||'?') + 'GB', 'ok');
+log('🏷 build v9.0-review · memory-safe · MAX_PIXELS=' + (MAX_PIXELS/1e6).toFixed(0) + 'MP · deviceMemory=' + (navigator.deviceMemory||'?') + 'GB', 'ok');
+
