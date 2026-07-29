@@ -1719,6 +1719,85 @@ function blendAlpha(prev, cur, w, h, factor) {
   return out;
 }
 
+/* ================= EXACT-TIMING ENCODER =================
+   BUG: MediaRecorder wall-clock time record karta hai. 6s video agar
+   process hone me 3 min lagi to output bhi 3 min ka banta hai (aur
+   duration metadata toot jaata hai -> video chalti nahi).
+
+   FIX: WebCodecs VideoEncoder + webm-muxer. Har frame ka timestamp HUM
+   set karte hain (idx/fps), processing kitni bhi slow ho — output ka
+   duration hamesha original ke barabar.                                  */
+function hasWebCodecs() {
+  return typeof VideoEncoder !== 'undefined' &&
+         typeof VideoFrame !== 'undefined' &&
+         typeof window.WebMMuxer !== 'undefined';
+}
+
+async function makeExactEncoder(W, H, fps, alpha, bitrate) {
+  const NS = window.WebMMuxer;
+  const Muxer = NS.Muxer || NS.default?.Muxer;
+  const Target = NS.ArrayBufferTarget || NS.default?.ArrayBufferTarget;
+  if (!Muxer || !Target) throw new Error('webm-muxer load nahi hua');
+
+  // pehle encoder config check karo taaki pata chale alpha milega ya nahi
+  let err = null, muxer = null;
+  const base = {
+    codec: 'vp09.00.10.08',
+    width: W, height: H,
+    bitrate: bitrate,
+    framerate: fps,
+    latencyMode: 'quality',
+  };
+  let cfg = alpha ? { ...base, alpha: 'keep' } : base;
+  let sup = await VideoEncoder.isConfigSupported(cfg);
+  let alphaOK = alpha;
+  if (!sup.supported && alpha) {
+    // kuch browsers VP9 alpha encode support nahi karte
+    cfg = base; alphaOK = false;
+    sup = await VideoEncoder.isConfigSupported(cfg);
+  }
+  if (!sup.supported) throw new Error('VP9 encoder config unsupported');
+
+  const target = new Target();
+  muxer = new Muxer({
+    target,
+    video: { codec: 'V_VP9', width: W, height: H, frameRate: fps, alpha: alphaOK },
+    firstTimestampBehavior: 'offset',
+  });
+  const encoder = new VideoEncoder({
+    output: (chunk, meta) => muxer.addVideoChunk(chunk, meta),
+    error: e => { err = e; console.error(e); },
+  });
+  encoder.configure(cfg);
+
+  const usPerFrame = 1e6 / fps;
+  let n = 0;
+  return {
+    async add(canvas, keyframe) {
+      if (err) throw err;
+      const frame = new VideoFrame(canvas, {
+        timestamp: Math.round(n * usPerFrame),
+        duration: Math.round(usPerFrame),
+        alpha: alphaOK ? 'keep' : 'discard',
+      });
+      encoder.encode(frame, { keyFrame: keyframe || n % 60 === 0 });
+      frame.close();
+      n++;
+      if (encoder.encodeQueueSize > 8) {
+        await new Promise(r => setTimeout(r, 4));   // backpressure
+      }
+    },
+    async finish() {
+      await encoder.flush();
+      encoder.close();
+      muxer.finalize();
+      return new Blob([target.buffer], { type: 'video/webm' });
+    },
+    get frames() { return n; },
+    get alphaOK() { return alphaOK; },
+  };
+}
+
 $('#runVideo').onclick = async () => {
   if (!vidFile) return alert('Pehle video select karo');
   if (running) return;
@@ -1764,27 +1843,42 @@ $('#runVideo').onclick = async () => {
     const total = Math.max(1, Math.round(dur * fps));
     log(`🎬 ${W}x${H} @${fps}fps · ${total} frames · ${mime.split(';')[0]} · bg=${bgMode}`);
 
-    const stream = out.captureStream(0);          // manual frame push
-    const track = stream.getVideoTracks()[0];
-    const canManual = typeof track.requestFrame === 'function';
+    // ---- encoder select: WebCodecs (exact timing) ya MediaRecorder (fallback) ----
+    const bitrate = +$('#vidBr').value * 1e6;
+    let enc = null, rec = null, stream = null, track = null,
+        canManual = false, chunks = [], stopped = null, audioTrack = null;
 
-    let audioTrack = null;
-    if ($('#vidAudio').checked) {
+    const wantExact = ($('#vidEnc')?.value || 'exact') === 'exact';
+    if (wantExact && hasWebCodecs()) {
       try {
-        const as = v.captureStream ? v.captureStream() : v.mozCaptureStream?.();
-        audioTrack = as?.getAudioTracks?.()[0];
-        if (audioTrack) { stream.addTrack(audioTrack); log('🔊 audio track added'); }
-      } catch (e) { log('⚠ audio capture fail — video-only', 'warn'); }
+        enc = await makeExactEncoder(W, H, fps, alpha, bitrate);
+        log(`🎯 WebCodecs encoder · VP9 · exact ${fps}fps timing`, 'ok');
+        if (alpha && !enc.alphaOK)
+          log('⚠ is browser me VP9 alpha encode support nahi — transparency ke bajaye Green screen mode use karo', 'warn');
+        else if (alpha) log('   ✓ alpha channel enabled', 'ok');
+      } catch (e) {
+        log(`⚠ WebCodecs fail (${e.message}) — MediaRecorder par fallback`, 'warn');
+        enc = null;
+      }
     }
-
-    const chunks = [];
-    const rec = new MediaRecorder(stream, {
-      mimeType: mime,
-      videoBitsPerSecond: +$('#vidBr').value * 1e6,
-    });
-    rec.ondataavailable = e => e.data.size && chunks.push(e.data);
-    const stopped = new Promise(r => rec.onstop = r);
-    rec.start();
+    if (!enc) {
+      log('⚠ MediaRecorder mode: output duration = processing time (real-time nahi). ' +
+          'Exact timing ke liye Chrome/Edge latest use karo.', 'warn');
+      stream = out.captureStream(0);
+      track = stream.getVideoTracks()[0];
+      canManual = typeof track.requestFrame === 'function';
+      if ($('#vidAudio').checked) {
+        try {
+          const as = v.captureStream ? v.captureStream() : v.mozCaptureStream?.();
+          audioTrack = as?.getAudioTracks?.()[0];
+          if (audioTrack) { stream.addTrack(audioTrack); log('🔊 audio track added'); }
+        } catch (e) { log('⚠ audio capture fail — video-only', 'warn'); }
+      }
+      rec = new MediaRecorder(stream, { mimeType: mime, videoBitsPerSecond: bitrate });
+      rec.ondataavailable = e => e.data.size && chunks.push(e.data);
+      stopped = new Promise(r => rec.onstop = r);
+      rec.start();
+    }
 
     v.pause(); v.muted = true;
     jobStart(`🎬 Video background remove — ${vidFile.name}`, total);
@@ -1852,7 +1946,8 @@ $('#runVideo').onclick = async () => {
       tcx.putImageData(fr, 0, 0);
       ox.drawImage(tmp, 0, 0);
 
-      if (canManual) track.requestFrame();
+      if (enc) await enc.add(out, idx === 0);
+      else if (canManual) track.requestFrame();
       px.clearRect(0, 0, W, H); px.drawImage(out, 0, 0);
 
       const p = (idx + 1) / total;
@@ -1865,13 +1960,19 @@ $('#runVideo').onclick = async () => {
     }
 
     if (pump) { pump.stop(); v.pause(); }
-    await sleep(150);
-    rec.stop();
-    await stopped;
-    if (audioTrack) audioTrack.stop();
 
-    const blob = new Blob(chunks, { type: mime.split(';')[0] || 'video/webm' });
-    if (!blob.size) throw new Error('encoder ne kuch output nahi diya');
+    let blob;
+    if (enc) {
+      log(`⏳ encoding finalize (${enc.frames} frames)…`);
+      blob = await enc.finish();
+    } else {
+      await sleep(150);
+      rec.stop();
+      await stopped;
+      if (audioTrack) audioTrack.stop();
+      blob = new Blob(chunks, { type: mime.split(';')[0] || 'video/webm' });
+    }
+    if (!blob || !blob.size) throw new Error('encoder ne kuch output nahi diya');
     const ext = blob.type.includes('mp4') ? 'mp4' : 'webm';
     const name = vidFile.name.replace(/\.[^.]+$/, '') + (alpha ? '-alpha' : '-nobg') + '.' + ext;
     const url = URL.createObjectURL(blob);
@@ -1886,7 +1987,10 @@ $('#runVideo').onclick = async () => {
     setProg(0);
     jobEnd(`Video ready — ${name}`);
     const secs = ((performance.now() - t0) / 1000).toFixed(1);
-    log(`✅ ready — ${name} · ${(blob.size/1048576).toFixed(1)} MB · ${secs}s · ${(total/secs).toFixed(1)} fps avg`, 'ok');
+    const outDur = (enc ? enc.frames / fps : +secs);
+    log(`✅ ready — ${name} · ${(blob.size/1048576).toFixed(1)} MB`, 'ok');
+    log(`   ⏱ output duration ${outDur.toFixed(1)}s (source ${dur.toFixed(1)}s) · processing ${secs}s · ${(total/secs).toFixed(1)} fps`,
+        Math.abs(outDur - dur) < 1.0 ? 'ok' : 'warn');
     if (alpha) log('ℹ Alpha WebM: Chrome, Premiere, DaVinci, CapCut me transparency dikhegi. WhatsApp/Insta alpha support nahi karte — waha green screen mode lo.', 'warn');
   } catch (e) {
     console.error(e); log('✖ video error: ' + e.message, 'err'); setProg(0);
@@ -2200,4 +2304,4 @@ addEventListener('beforeunload', () => { try { ocrWorker?.terminate(); } catch(e
 /* warm up in background so first real run is fast */
 addEventListener('load', () => { cvReady().then(() => log('✅ OpenCV engine ready', 'ok')).catch(() => {}); });
 log('👋 Ready. Images drop karo — sab kuch automatically ho jayega.');
-log('🏷 build v13.0-stable · memory-safe · MAX_PIXELS=' + (MAX_PIXELS/1e6).toFixed(0) + 'MP · deviceMemory=' + (navigator.deviceMemory||'?') + 'GB', 'ok');
+log('🏷 build v14.0-exact · memory-safe · MAX_PIXELS=' + (MAX_PIXELS/1e6).toFixed(0) + 'MP · deviceMemory=' + (navigator.deviceMemory||'?') + 'GB', 'ok');
