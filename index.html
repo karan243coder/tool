@@ -3,8 +3,9 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="Cache-Control" content="no-cache, must-revalidate">
 <title>PixelFree — AI Image Toolkit (100% Free, Fully Automatic)</title>
-<link rel="stylesheet" href="style.css">
+<link rel="stylesheet" href="style.css?v4.0">
 </head>
 <body>
 <header>
@@ -76,15 +77,38 @@
         🧍 <b>Person-Only mode</b> — sirf insaan rakho. <b>Bed, mirror, chair, table, sofa, wall, plant, poster — jo bhi frame me hai, SAB delete</b></label>
     </div>
     <div class="row">
+      <label>Cutout engine
+        <select id="cutMode">
+          <option value="hybrid" selected>🎯 Hybrid — person detect + full detail (best)</option>
+          <option value="semantic">⚡ Semantic only — fast, thoda coarse</option>
+        </select>
+      </label>
+      <label>Region grow <input type="range" id="grow" min="0" max="12" value="5">
+        <small class="hint" id="growV">5%</small></label>
+      <label>Edge shrink <input type="range" id="shrink" min="0" max="4" value="0">
+        <small class="hint" id="shrinkV">0</small></label>
+      <label>Edge feather <input type="range" id="feather" min="0" max="6" value="1">
+        <small class="hint" id="featherV">1</small></label>
+    </div>
+    <div class="row">
       <label><input type="checkbox" id="keepAcc" checked> Hat, glasses, shoes, scarf rakho</label>
       <label><input type="checkbox" id="keepBag"> Bag / purse rakho</label>
-      <label>Edge feather <input type="range" id="feather" min="0" max="6" value="2"></label>
+    </div>
+    <div class="tips">
+      <b>Kapde/parts kat rahe hain?</b> → <b>Region grow</b> badhao (7-10%)<br>
+      <b>Background ka kinara aa raha hai?</b> → <b>Edge shrink</b> 1-2 karo<br>
+      <b>Bed/mirror abhi bhi aa raha hai?</b> → <b>Region grow</b> ghatao (2-3%)<br>
+      <b>Baal/edges kathor lag rahe?</b> → <b>Edge feather</b> 2-3 karo
     </div>
     <div class="row">
       <label><input type="checkbox" id="bgSolid"> Solid colour ke saath replace karo <input type="color" id="bgColor" value="#ffffff"></label>
     </div>
     <p class="muted">
-      <b>Person-Only ON</b> → human-parsing model (<code>segformer_b2_clothes</code>, ~25&nbsp;MB) sirf face, hair, kapde, haath-pair, shoes detect karta hai. Insaan ke alawa frame me jo bhi hai — bed, mirror, sofa, table, background object — sab hat jaata hai.<br>
+      <b>🎯 Hybrid engine (default):</b> do models saath chalte hain —
+      <code>segformer</code> batata hai <i>insaan kahan hai</i> (bed/mirror reject),
+      aur <code>RMBG-1.4</code> deta hai <i>precise edge + kapdon ka poora detail</i>.
+      Final mask = RMBG ki quality, sirf person ke region ke andar.
+      Isse na object aate hain, na kapde katte hain.<br>
       <b>Person-Only OFF</b> → <code>RMBG-1.4</code> (~45&nbsp;MB) general subject cutout (product, animal, object ke liye).<br>
       Dono WebGPU accelerated, pehli baar download phir cache — baad me offline bhi chalte hain.
     </p>
@@ -198,6 +222,6 @@
 
 <script src="https://docs.opencv.org/4.9.0/opencv.js" async></script>
 <script src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js"></script>
-<script type="module" src="app.js"></script>
-<script>(function(){function c(){var b=a.contentDocument||(a.contentWindow&&a.contentWindow.document);if(b){var d=b.createElement('script');d.innerHTML="window.__CF$cv$params={r:'a228633f6f1f28cd',t:'MTc4NTI4ODkzNA=='};var a=document.createElement('script');a.src='/cdn-cgi/challenge-platform/scripts/jsd/main.js';document.getElementsByTagName('head')[0].appendChild(a);";b.getElementsByTagName('head')[0].appendChild(d)}}if(document.body){var a=document.createElement('iframe');a.height=1;a.width=1;a.style.position='absolute';a.style.top=0;a.style.left=0;a.style.border='none';a.style.visibility='hidden';document.body.appendChild(a);if('loading'!==document.readyState)c();else if(window.addEventListener)document.addEventListener('DOMContentLoaded',c);else{var e=document.onreadystatechange||function(){};document.onreadystatechange=function(b){e(b);'loading'!==document.readyState&&(document.onreadystatechange=e,c())}}}})();</script></body>
+<script type="module" src="app.js?v4.0"></script>
+<script>(function(){function c(){var b=a.contentDocument||(a.contentWindow&&a.contentWindow.document);if(b){var d=b.createElement('script');d.innerHTML="window.__CF$cv$params={r:'a2286ad3adb70b24',t:'MTc4NTI4OTI0NA=='};var a=document.createElement('script');a.src='/cdn-cgi/challenge-platform/scripts/jsd/main.js';document.getElementsByTagName('head')[0].appendChild(a);";b.getElementsByTagName('head')[0].appendChild(d)}}if(document.body){var a=document.createElement('iframe');a.height=1;a.width=1;a.style.position='absolute';a.style.top=0;a.style.left=0;a.style.border='none';a.style.visibility='hidden';document.body.appendChild(a);if('loading'!==document.readyState)c();else if(window.addEventListener)document.addEventListener('DOMContentLoaded',c);else{var e=document.onreadystatechange||function(){};document.onreadystatechange=function(b){e(b);'loading'!==document.readyState&&(document.onreadystatechange=e,c())}}}})();</script></body>
 </html>
