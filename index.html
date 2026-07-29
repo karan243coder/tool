@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta http-equiv="Cache-Control" content="no-cache, must-revalidate">
 <title>PixelFree — AI Image Toolkit (100% Free, Fully Automatic)</title>
-<link rel="stylesheet" href="style.css?v15.0">
+<link rel="stylesheet" href="style.css?v16.0">
 </head>
 <body>
 <header>
@@ -248,12 +248,15 @@
       Frame-accurate seeking (requestVideoFrameCallback) se koi frame miss nahi hota.
     </p>
     <div class="tips">
-      <b>🐛 v15 fix:</b> pehle playback mode me video real-time chalti thi jabki AI
-      har frame par ~250ms leta hai — 6.8s video 6.8s me khatam, sirf 27 frames capture
-      hote the → <b>output 1-2 sec ka</b>. Ab video har frame par <b>pause</b> hoti hai,
-      process complete hone par hi aage badhti hai. <b>Ek bhi frame miss nahi.</b><br>
-      <b>Capture mode:</b> 🎯 Seek default hai — sabse reliable, har frame guaranteed<br>
-      <b>Speed:</b> Mask reuse every 2nd/3rd + FPS 10-15 · progress me live "out Xs" dikhega
+      <b>🐛 v16 fix — face/skin gayab hone ka:</b> pehle person-region ke bahar ka alpha
+      <b>hard-kill</b> ho jaata tha. Segformer 512px par chalta hai, motion-blur ya angle par
+      kabhi-kabhi face/haath miss kar deta tha → us frame me hole.<br>
+      <b>Ab 3 layer protection:</b><br>
+      • <b>🤚 Skin rescue</b> — skin pixels kabhi kill nahi hote, chahe region miss kare<br>
+      • <b>🧠 Memory</b> — pichle 3 frames yaad, ek frame ka dropout apne aap bhar jaata hai<br>
+      • <b>🕳 Hole fill</b> — mask ke andar ke chhed morphology + flood-fill se bharte hain<br>
+      Objects phir bhi nahi aate — ye sab RMBG alpha ke <b>andar</b> hota hai, bahar nahi.<br>
+      <b>Face abhi bhi kat raha?</b> → Memory <b>5 frames</b> + Region grow badhao (8-10%)
     </div>
     <input type="file" id="vidInput" accept="video/*,.mp4,.webm,.mov,.mkv" style="display:none">
     <div id="vidDrop">
@@ -312,6 +315,13 @@
           </select></label>
         <label>Smoothing <input type="range" id="vidSmooth" min="20" max="100" value="60">
           <small class="hint" id="vidSmoothV">60%</small></label>
+        <label>🧠 Memory <select id="vidMemory">
+            <option value="1">off</option>
+            <option value="3" selected>3 frames ⭐</option>
+            <option value="5">5 frames (max fill)</option>
+          </select></label>
+        <label><input type="checkbox" id="vidSkinRescue" checked> 🤚 Skin rescue</label>
+        <label><input type="checkbox" id="vidHoleFill" checked> 🕳 Hole fill</label>
         <label>Bitrate <select id="vidBr"><option>2</option><option selected>4</option><option>8</option></select> Mbps</label>
         <label><input type="checkbox" id="vidAudio"> Keep audio</label>
       </div>
@@ -361,6 +371,6 @@
 <script src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/tesseract.js@5.1.1/dist/tesseract.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/webm-muxer@5.1.4/build/webm-muxer.js"></script>
-<script type="module" src="app.js?v15.0"></script>
-<script>(function(){function c(){var b=a.contentDocument||(a.contentWindow&&a.contentWindow.document);if(b){var d=b.createElement('script');d.innerHTML="window.__CF$cv$params={r:'a2293126cd481882',t:'MTc4NTI5NzM2OA=='};var a=document.createElement('script');a.src='/cdn-cgi/challenge-platform/scripts/jsd/main.js';document.getElementsByTagName('head')[0].appendChild(a);";b.getElementsByTagName('head')[0].appendChild(d)}}if(document.body){var a=document.createElement('iframe');a.height=1;a.width=1;a.style.position='absolute';a.style.top=0;a.style.left=0;a.style.border='none';a.style.visibility='hidden';document.body.appendChild(a);if('loading'!==document.readyState)c();else if(window.addEventListener)document.addEventListener('DOMContentLoaded',c);else{var e=document.onreadystatechange||function(){};document.onreadystatechange=function(b){e(b);'loading'!==document.readyState&&(document.onreadystatechange=e,c())}}}})();</script></body>
+<script type="module" src="app.js?v16.0"></script>
+<script>(function(){function c(){var b=a.contentDocument||(a.contentWindow&&a.contentWindow.document);if(b){var d=b.createElement('script');d.innerHTML="window.__CF$cv$params={r:'a2293d5deb117efd',t:'MTc4NTI5Nzg2OA=='};var a=document.createElement('script');a.src='/cdn-cgi/challenge-platform/scripts/jsd/main.js';document.getElementsByTagName('head')[0].appendChild(a);";b.getElementsByTagName('head')[0].appendChild(d)}}if(document.body){var a=document.createElement('iframe');a.height=1;a.width=1;a.style.position='absolute';a.style.top=0;a.style.left=0;a.style.border='none';a.style.visibility='hidden';document.body.appendChild(a);if('loading'!==document.readyState)c();else if(window.addEventListener)document.addEventListener('DOMContentLoaded',c);else{var e=document.onreadystatechange||function(){};document.onreadystatechange=function(b){e(b);'loading'!==document.readyState&&(document.onreadystatechange=e,c())}}}})();</script></body>
 </html>
