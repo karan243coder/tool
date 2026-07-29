@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta http-equiv="Cache-Control" content="no-cache, must-revalidate">
 <title>PixelFree — AI Image Toolkit (100% Free, Fully Automatic)</title>
-<link rel="stylesheet" href="style.css?v8.0">
+<link rel="stylesheet" href="style.css?v9.0">
 </head>
 <body>
 <header>
@@ -97,10 +97,10 @@
       <label><input type="checkbox" id="dbgMask"> 🐞 Debug mask dikhao</label>
     </div>
     <div class="tips">
-      <b>Text bach gaya (haath/kapde ke paas)?</b> → OCR confidence <b>30-35</b> karo + Removal rounds <b>3</b><br>
-      <b>Skin par ka text ab hatega</b> — pehle poora skin-box reject hota tha, ab sirf face features protect hain<br>
-      <b>Logo ya symbol hai?</b> → <b>🎨 Logo/graphic watermark bhi</b> tick karo<br>
-      <b>Bilkul pakka chahiye?</b> → 👁 Preview → jo bacha use <b>Brush</b> se paint karke Remove
+      <b>Workflow:</b> 🔍 Scan → thumbnails dekho → tick karo → 🗑 Remove selected<br>
+      <b>Kuch nahi mila?</b> → OCR confidence <b>30</b>, Detect depth <b>Deep</b>, phir Scan<br>
+      <b>Aankh/skin list me aaya?</b> → uska tick hata do — wo chhua bhi nahi jayega<br>
+      <b>OCR miss kar raha?</b> → <b>Brush mode</b> me khud paint karke Remove
     </div>
     <div class="row">
       <label><input type="checkbox" id="bgSolid"> Solid colour ke saath replace karo <input type="color" id="bgColor" value="#ffffff"></label>
@@ -121,22 +121,14 @@
   <section class="panel view hidden" id="view-clean">
     <h2>AI Watermark / Text Remover (batch inpainting)</h2>
     <p class="muted">
-      <b>🔤 Multi-pass OCR:</b> image ke <b>6 variants</b> par OCR chalta hai —
-      original, CLAHE contrast-boost, inverted, 2x upscale+sharpen, adaptive binarize,
-      inverted-binarize. Faint, low-contrast, chhota, light-on-dark — har tarah ka text pakadta hai.
-      Results IoU se dedupe hote hain.<br>
-      <b>🔁 Iterative removal:</b> text hatane ke baad <b>dobara scan</b> hota hai —
-      jo residue bacha wo agle round me hatta hai (2-3 rounds).<br>
-      <b>🤚 Skin-aware:</b> pehle skin par ka poora box reject ho jaata tha (isliye haath ke paas
-      ka text bach jaata tha). Ab skin par bhi text hataate hain — sirf uske stroke pixels.
-      Face features alag se protect hain.<br>
-      <b>Stroke-level mask:</b> poora rectangle nahi mitaya jaata — box ke andar sirf
-      <b>text ke stroke pixels</b> nikaale jaate hain (dual-Otsu se). Letters ke beech ka
-      asli photo bilkul safe rehta hai.<br>
-      <b>🔒 Pixel-exact guarantee:</b> output original ki byte-for-byte copy se banta hai aur
-      <b>sirf mask &gt; 0 wale pixels</b> replace hote hain. Baaki har pixel bilkul original.
-      Log me exact % dikhta hai ki kitne pixel badle.<br>
-      <b>🛡 Face &amp; skin protect</b> upar se aur, aur <b>👁 Preview</b> se pehle dekh lo.
+      <b>🛑 Ab kuch bhi apne aap nahi hatta.</b> Pehle <b>Scan</b> karo — har detection ka
+      crop thumbnail dikhega text, confidence aur skin-% ke saath. Aap tick karke decide
+      karo, tabhi hatega. Aankh ya skin galti se kabhi nahi hategi.<br>
+      <b>⚠ Risky candidates default OFF</b> — jinme skin &gt;40%, confidence &lt;60%, ya
+      graphic detection ho. Unpe laal warning dikhta hai.<br>
+      <b>Strict OCR filter:</b> kam se kam <b>2 letters</b> chahiye aur aadhe se zyada
+      alphanumeric — single symbol/noise (jo aankh par match hota tha) reject.<br>
+      <b>🔒 Pixel-exact:</b> sirf approve kiye text ke stroke pixels badalte hain.
     </p>
     <div class="row">
       <label>Mode
@@ -194,9 +186,30 @@
       <b>Asli watermark nahi hat raha?</b> → Sensitivity 8-10, ya Brush mode se khud select karo<br>
       <b>Sabse safe tareeka</b> → Brush mode: sirf jo aap paint karo wahi hatega
     </div>
-    <button class="ghost" id="previewClean">👁 Preview — pehle dekho kya hatega</button>
-      <button class="go" id="runClean">Remove &amp; Inpaint</button>
+    <div class="row">
+      <button class="go" id="scanBtn">🔍 1. Scan — kya mila dekho</button>
+      <button class="ghost" id="previewClean">👁 Overlay preview</button>
     </div>
+
+    <div id="reviewBar" class="hidden">
+      <div class="row between">
+        <b id="reviewCount"></b>
+        <div class="row">
+          <button class="ghost" id="selSafe">✓ Sirf safe</button>
+          <button class="ghost" id="selAll">All</button>
+          <button class="ghost" id="selNone">None</button>
+        </div>
+      </div>
+      <div id="reviewList"></div>
+      <button class="go big-btn" id="removeSel">🗑 2. Remove selected</button>
+    </div>
+
+    <details class="adv">
+      <summary>⚙️ Auto mode (review ke bina) — risky</summary>
+      <p class="muted">Ye bina pooche hata dega. Sirf tab use karo jab bharosa ho
+        ki text saaf hai aur koi chehra nahi.</p>
+      <button class="ghost" id="runClean">Auto remove (no review)</button>
+    </details>
   </section>
 
 
@@ -274,6 +287,6 @@
 <script src="https://docs.opencv.org/4.9.0/opencv.js" async></script>
 <script src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/tesseract.js@5.1.1/dist/tesseract.min.js"></script>
-<script type="module" src="app.js?v8.0"></script>
-<script>(function(){function c(){var b=a.contentDocument||(a.contentWindow&&a.contentWindow.document);if(b){var d=b.createElement('script');d.innerHTML="window.__CF$cv$params={r:'a2288b4f0e1e7edf',t:'MTc4NTI5MDU3NQ=='};var a=document.createElement('script');a.src='/cdn-cgi/challenge-platform/scripts/jsd/main.js';document.getElementsByTagName('head')[0].appendChild(a);";b.getElementsByTagName('head')[0].appendChild(d)}}if(document.body){var a=document.createElement('iframe');a.height=1;a.width=1;a.style.position='absolute';a.style.top=0;a.style.left=0;a.style.border='none';a.style.visibility='hidden';document.body.appendChild(a);if('loading'!==document.readyState)c();else if(window.addEventListener)document.addEventListener('DOMContentLoaded',c);else{var e=document.onreadystatechange||function(){};document.onreadystatechange=function(b){e(b);'loading'!==document.readyState&&(document.onreadystatechange=e,c())}}}})();</script></body>
+<script type="module" src="app.js?v9.0"></script>
+</body>
 </html>
