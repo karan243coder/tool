@@ -55,3 +55,8 @@ footer{text-align:center;color:#8b949e;font-size:12px;padding:20px}
 #vidDrop .big{font-size:30px}
 #vidDrop.hot{border-color:#3fb950;background:#12261a}
 #vidOut{margin-top:14px}
+
+.hint{color:#3fb950;font-weight:600;min-width:30px}
+.tips{background:#0d1117;border-left:3px solid #3fb950;padding:10px 14px;border-radius:8px;
+  font-size:12.5px;color:#8b949e;line-height:1.9;margin:10px 0}
+.tips b{color:#e6edf3}
