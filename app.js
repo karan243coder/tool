@@ -91,6 +91,21 @@ function showResults() {
      ${o.link ? `<a href="${o.link}" target="_blank">🔗 link</a>` : ''}</div>`).join('');
   $('#outwrap').classList.toggle('hidden', !outputs.length);
 }
+/* Bade images (12MP+) browser WASM heap crash karte hain. Kaam se pehle
+   safe size par utaar dete hain; final output isi size par save hota hai. */
+const MAX_PIXELS = 12e6;   // ~12MP (4240x2830)
+function capCanvas(img) {
+  const px = img.width * img.height;
+  if (px <= MAX_PIXELS) return img;
+  const f = Math.sqrt(MAX_PIXELS / px);
+  const w = Math.round(img.width * f), h = Math.round(img.height * f);
+  const c = canvasOf(w, h);
+  const x = c.getContext('2d'); x.imageSmoothingQuality = 'high';
+  x.drawImage(img, 0, 0, w, h);
+  log(`   ↓ ${img.width}x${img.height} → ${w}x${h} (memory safe)`, 'warn');
+  return c;
+}
+
 const loadImg = src => new Promise((res, rej) => {
   const i = new Image(); i.crossOrigin = 'anonymous';
   i.onload = () => res(i); i.onerror = () => rej(new Error('image decode failed')); i.src = src;
@@ -222,7 +237,10 @@ const PERSON_LABELS = ['Background', 'Hat', 'Hair', 'Sunglasses', 'Upper-clothes
 /** feather + despeckle the binary alpha so edges look natural */
 async function refineAlpha(alpha, w, h, feather) {
   await cvReady();
-  const m = cv.matFromArray(h, w, cv.CV_8U, Array.from(alpha));
+  // NOTE: Array.from(alpha) 4K image par ~100M-element JS array banata tha ->
+  // "Array buffer allocation failed". Ab seedha Mat buffer me copy karte hain.
+  const m = new cv.Mat(h, w, cv.CV_8U);
+  m.data.set(alpha);
   const scale = Math.max(1, Math.round(Math.min(w, h) / 500));
   // remove small islands (mirror reflections, stray blobs)
   const contours = new cv.MatVector(), hier = new cv.Mat();
@@ -243,16 +261,20 @@ async function refineAlpha(alpha, w, h, feather) {
     const b = 2 * Math.round(feather * scale) + 1;
     cv.GaussianBlur(cleaned, cleaned, new cv.Size(b, b), 0);
   }
-  const res = new Uint8ClampedArray(cleaned.data);
+  const res = new Uint8ClampedArray(cleaned.data);   // copy before delete
   m.delete(); cleaned.delete(); k.delete();
   return res;
 }
 
 /** Full person cutout: everything except the human is deleted. */
 async function personCutout(url, opts) {
-  const img = await loadImg(url);
+  const img = capCanvas(await loadImg(url));
   const w = img.width, h = img.height;
-  let { alpha, hit } = await personAlpha(url, w, h, opts);
+  // capped canvas se hi model ko feed karo taaki sizes match rahein
+  const feedUrl = img.tagName === 'CANVAS'
+    ? await new Promise(r => img.toBlob(b => r(URL.createObjectURL(b)), 'image/jpeg', 0.95))
+    : url;
+  let { alpha, hit } = await personAlpha(feedUrl, w, h, opts);
   if (!hit) {
     log('   ⚠ koi person nahi mila — normal AI cutout par fallback', 'warn');
     return { canvas: await removeBg(url, opts.bgColor), fallback: true };
@@ -371,6 +393,18 @@ function autoMask(src, sens) {
   const kd = cv.getStructuringElement(cv.MORPH_ELLIPSE, new cv.Size(3, 3));
   cv.dilate(smallMask, smallMask, kd); kd.delete();
 
+  /* SAFETY: agar detector image ka bahut bada hissa maang raha hai to wo
+     galat detect kar raha hai (texture/pattern ko text samajh liya).
+     Aise me mask drop kar dete hain — aadhi photo inpaint karne se behtar
+     hai kuch na karna. User sensitivity kam karke ya brush se kar sakta hai. */
+  const cap = +($('#cleanCap')?.value || 25) / 100;
+  const frac = cv.countNonZero(smallMask) / area;
+  if (frac > cap) {
+    log(`   ⚠ detector ne ${(frac*100).toFixed(0)}% area maanga (cap ${(cap*100)|0}%) — skip. Sensitivity kam karo ya brush mode use karo.`, 'warn');
+    smallMask.setTo(new cv.Scalar(0));
+    boxes.length = 0;
+  }
+
   // --- upscale mask back to full res ---
   const mask = new cv.Mat();
   if (f < 1) cv.resize(smallMask, mask, new cv.Size(src.cols, src.rows), 0, 0, cv.INTER_NEAREST);
@@ -460,7 +494,7 @@ function inpaintWith(src, mask, quality) {
 async function cleanImage(url, sens, brushMask) {
   await cvReady();
   const t0 = performance.now();
-  const img = await loadImg(url);
+  const img = capCanvas(await loadImg(url));
   const c = canvasOf(img.width, img.height);
   c.getContext('2d').drawImage(img, 0, 0);
   const src = cv.imread(c);
@@ -728,7 +762,11 @@ async function runAuto() {
         if (!o.link) log(`   ✖ link fail (network/host blocked)`, 'warn');
         showResults();
       }
+      // free intermediate blob URLs so heap na bhare
+      if (workUrl !== f.url) URL.revokeObjectURL(workUrl);
+      workCanvas = null;
       setProg(base + step, '');
+      await sleep(0);
     }
     setProg(0);
     log(`🎉 Done — ${outputs.length} file(s) ready. ZIP se sab download kar lo.`, 'ok');
