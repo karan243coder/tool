@@ -20,8 +20,6 @@
   <button class="tab" data-tab="clean">🧽 Watermark / Text</button>
   <button class="tab" data-tab="video">🎬 Video BG Remove</button>
   <button class="tab" data-tab="host">🔗 File Link</button>
-  <button class="tab" data-tab="faceswap">🎭 Face Swap</button>
-  <button class="tab" data-tab="img2img">🎨 Prompt Edit (Img2Img)</button>
 </nav>
 
 <main>
@@ -346,61 +344,6 @@
     </div>
   </section>
 
-  <!-- FACESWAP -->
-  <section class="panel view hidden" id="view-faceswap">
-    <h2>🎭 Face Swap — Browser me Abhi Kaam Karta Hai</h2>
-    <p class="muted">
-      <b>Browser AI:</b> face-api.js (~2MB model) face detect karta hai → face crop => target image pe overlay/blend. 100% browser me, koi server nahi.
-    </p>
-    <div class="row">
-      <label><b>Source Face Image</b> (jiska chehra lagana hai)</label>
-      <input type="file" id="fsSource" accept="image/*" style="width:100%">
-    </div>
-    <div class="row">
-      <label><b>Target Image</b> (jisme chehra lagana hai)</label>
-      <input type="file" id="fsTarget" accept="image/*" style="width:100%">
-    </div>
-    <div class="row">
-      <label>Blend strength <input type="range" id="fsBlend" min="50" max="100" value="85"> <small id="fsBlendV">85%</small></label>
-      <label>Face size scale <input type="range" id="fsScale" min="70" max="130" value="100"> <small id="fsScaleV">100%</small></label>
-    </div>
-    <div id="fsPreviewWrap" class="hidden" style="margin:12px 0;display:flex;gap:12px;flex-wrap:wrap;">
-      <div><b>Source</b><br><img id="fsSrcImg" style="max-width:220px;border-radius:8px;border:2px solid #3fb950;"></div>
-      <div><b>Target</b><br><img id="fsTgtImg" style="max-width:220px;border-radius:8px;border:2px solid #f59e0b;"></div>
-      <div><b>Result</b><br><canvas id="fsResult" style="max-width:300px;border-radius:8px;background:#222;"></canvas></div>
-    </div>
-    <button class="go" id="runFaceSwap">▶ Face Swap (Browser AI)</button>
-    <p class="muted" style="margin-top:6px;font-size:0.9em;">
-      Note: Ye face-api.js se face detect + overlay karta hai — perfect deepfake nahi, lekin working face swap hai. Real deepfake ke liye backend (ReActor/Roop) chahiye.
-    </p>
-  </section>
-
-  <!-- IMG2IMG / PROMPT EDIT -->
-  <section class="panel view hidden" id="view-img2img">
-    <h2>🎨 Prompt Edit / Image-to-Image (Civitai Best Models)</h2>
-    <p class="muted">
-      <b>Realistic truth:</b> Best Image-to-Image / prompt-based photo edit (Civitai FLUX, SDXL, ControlNet) <b>pure browser me</b> 100% consistent run nahi ho sakta — diffusion models 7-15GB ke hote hain.
-    </p>
-    <h3>🏆 Best Civitai Models (Image-to-Image + Prompt Edit)</h3>
-    <ul>
-      <li><b>FLUX.1-dev / FLUX.1-schnell (Black Forest Labs)</b> — best text-to-image + img2img consistency.</li>
-      <li><b>SDXL 1.0 Base / Refiner</b> — high-res image edit (1024x1024+).</li>
-      <li><b>IP-Adapter SDXL</b> — prompt se photo edit (style + identity preserve).</li>
-      <li><b>ControlNet (Canny, Depth, OpenPose)</b> — structure retain + prompt change.</li>
-      <li><b>Best Prompt Edit LoRAs (Civitai):</b> style-transfer, detail-tuner, color-correct, face-enhance.</li>
-    </ul>
-    <h3>💯 100% Consistency Guarantee — Architecture</h3>
-    <div class="opts">
-      <label><b>Same Seed Lock</b> — har edit me fixed seed se consistency</label><br>
-      <label><b>Identity Embedding</b> — face / object identity preserve (IP-Adapter)</label><br>
-      <label><b>ControlNet + Inpainting</b> — sirf specific region edit (mask based)</label><br>
-      <label><b>Backend (Python / ComfyUI / API)</b> — Civitai model load + inference</label>
-    </div>
-    <p class="muted">
-      <b>Ready code in this repo:</b> Aap is repo ke browser front-end ko backend se connect kar sakte ho (API endpoint ya Python server). Best Civitai models (FLUX, SDXL, ControlNet) se high-quality, consistent image-to-image editing 100% possible hai — bas pure browser se nahi, backend se.
-    </p>
-  </section>
-
   <!-- HOST -->
   <section class="panel view hidden" id="view-host">
     <h2>File → Link (telegra.ph style)</h2>
@@ -430,11 +373,10 @@
 <footer>Sab processing aapke browser me · koi file server par nahi jaati (jab tak aap link feature on na karo) · free forever</footer>
 
 <script src="https://docs.opencv.org/4.9.0/opencv.js" async></script>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/face-api.js/0.22.2/face-api.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/tesseract.js@5.1.1/dist/tesseract.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/webm-muxer@5.1.4/build/webm-muxer.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/mp4box@0.5.2/dist/mp4box.all.min.js"></script>
 <script type="module" src="app.js?v17.0"></script>
-<script>(function(){function c(){var b=a.contentDocument||(a.contentWindow&&a.contentWindow.document);if(b){var d=b.createElement('script');d.innerHTML="window.__CF$cv$params={r:'a2294922094a7fd0',t:'MTc4NTI5ODM1MA=='};var a=document.createElement('script');a.src='/cdn-cgi/challenge-platform/scripts/jsd/main.js';document.getElementsByTagName('head')[0].appendChild(a);";b.getElementsByTagName('head')[0].appendChild(d)}}if(document.body){var a=document.createElement('iframe');a.height=1;a.width=1;a.style.position='absolute';a.style.top=0;a.style.left=0;a.style.border='none';a.style.visibility='hidden';document.body.appendChild(a);if('loading'!==document.readyState)c();else if(window.addEventListener)document.addEventListener('DOMContentLoaded',c);else{var e=document.onreadystatechange||function(){};document.onreadystatechange=function(b){e(b);'loading'!==document.readyState&&(document.onreadystatechange=e,c())}}}})();</script><script>(function(){function c(){var b=a.contentDocument||(a.contentWindow&&a.contentWindow.document);if(b){var d=b.createElement('script');d.innerHTML="window.__CF$cv$params={r:'a229d56ffedbcbb5',t:'MTc4NTMwNDA5Nw=='};var a=document.createElement('script');a.src='/cdn-cgi/challenge-platform/scripts/jsd/main.js';document.getElementsByTagName('head')[0].appendChild(a);";b.getElementsByTagName('head')[0].appendChild(d)}}if(document.body){var a=document.createElement('iframe');a.height=1;a.width=1;a.style.position='absolute';a.style.top=0;a.style.left=0;a.style.border='none';a.style.visibility='hidden';document.body.appendChild(a);if('loading'!==document.readyState)c();else if(window.addEventListener)document.addEventListener('DOMContentLoaded',c);else{var e=document.onreadystatechange||function(){};document.onreadystatechange=function(b){e(b);'loading'!==document.readyState&&(document.onreadystatechange=e,c())}}}})();</script></body>
+<script>(function(){function c(){var b=a.contentDocument||(a.contentWindow&&a.contentWindow.document);if(b){var d=b.createElement('script');d.innerHTML="window.__CF$cv$params={r:'a2294922094a7fd0',t:'MTc4NTI5ODM1MA=='};var a=document.createElement('script');a.src='/cdn-cgi/challenge-platform/scripts/jsd/main.js';document.getElementsByTagName('head')[0].appendChild(a);";b.getElementsByTagName('head')[0].appendChild(d)}}if(document.body){var a=document.createElement('iframe');a.height=1;a.width=1;a.style.position='absolute';a.style.top=0;a.style.left=0;a.style.border='none';a.style.visibility='hidden';document.body.appendChild(a);if('loading'!==document.readyState)c();else if(window.addEventListener)document.addEventListener('DOMContentLoaded',c);else{var e=document.onreadystatechange||function(){};document.onreadystatechange=function(b){e(b);'loading'!==document.readyState&&(document.onreadystatechange=e,c())}}}})();</script></body>
 </html>
