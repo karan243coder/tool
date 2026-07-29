@@ -1734,6 +1734,93 @@ function blendAlpha(prev, cur, w, h, factor) {
   return out;
 }
 
+/* ================= FACE/SKIN RESCUE + TEMPORAL MEMORY =================
+   BUG: `if (personRegion[i] < 128) alpha[i] = 0` ek HARD KILL tha. Agar
+   segformer ne kisi frame me face/haath miss kiya (512px par chalta hai,
+   motion blur / angle par flaky hai), to wo hissa poora ZERO ho jaata tha
+   -> face me hole.
+
+   FIX (3 layers):
+     1. SKIN RESCUE   — skin pixels kabhi kill nahi hote, chahe region miss kare
+     2. TEMPORAL MEM  — pichle N frames ka max yaad rakho; ek frame ka dropout bhar jaata hai
+     3. HOLE FILL     — mask ke andar ke chhed morphology se bharte hain
+   Objects phir bhi nahi aate kyunki ye sab RMBG alpha ke ANDAR hi hota hai. */
+
+let skinBuf = null, skinSmall = null, skinCtx = null;
+
+/** fast per-frame skin mask (YCrCb + HSV), chhoti res par */
+function frameSkinMask(grabCanvas, W, H) {
+  const SW = 256, SH = Math.max(64, Math.round(256 * H / W));
+  if (!skinSmall || skinSmall.width !== SW || skinSmall.height !== SH) {
+    skinSmall = canvasOf(SW, SH);
+    skinCtx = skinSmall.getContext('2d', { willReadFrequently: true });
+  }
+  skinCtx.drawImage(grabCanvas, 0, 0, SW, SH);
+  const d = skinCtx.getImageData(0, 0, SW, SH).data;
+  const small = new Uint8Array(SW * SH);
+  for (let i = 0; i < SW * SH; i++) {
+    const o = 4 * i, r = d[o], g = d[o + 1], b = d[o + 2];
+    // YCrCb
+    const y  =  0.299 * r + 0.587 * g + 0.114 * b;
+    const cr =  (r - y) * 0.713 + 128;
+    const cb =  (b - y) * 0.564 + 128;
+    const ycc = cr >= 133 && cr <= 180 && cb >= 77 && cb <= 127;
+    // simple RGB rule (dono skin tones)
+    const mx = Math.max(r, g, b), mn = Math.min(r, g, b);
+    const rgb = r > 60 && g > 30 && b > 15 && r > b && (mx - mn) > 12 && Math.abs(r - g) > 8;
+    if (ycc || rgb) small[i] = 255;
+  }
+  // upscale to W,H (nearest, fast)
+  if (!skinBuf || skinBuf.length !== W * H) skinBuf = new Uint8Array(W * H);
+  for (let y = 0; y < H; y++) {
+    const sy = ((y * SH / H) | 0) * SW, row = y * W;
+    for (let x = 0; x < W; x++) skinBuf[row + x] = small[sy + ((x * SW / W) | 0)];
+  }
+  return skinBuf;
+}
+
+/** mask ke andar ke chhed bharo + edges saaf (OpenCV, W*H) */
+function fillHoles(alpha, W, H, strength) {
+  const m = new cv.Mat(H, W, cv.CV_8U);
+  m.data.set(alpha);
+  const bin = new cv.Mat();
+  cv.threshold(m, bin, 100, 255, cv.THRESH_BINARY);
+  const k = Math.max(3, (strength | 1));
+  const kern = cv.getStructuringElement(cv.MORPH_ELLIPSE, new cv.Size(k, k));
+  cv.morphologyEx(bin, bin, cv.MORPH_CLOSE, kern);        // chhed band
+  // flood-fill se interior holes bharo
+  const ff = bin.clone();
+  const mask2 = cv.Mat.zeros(H + 2, W + 2, cv.CV_8U);
+  cv.floodFill(ff, mask2, new cv.Point(0, 0), new cv.Scalar(255));
+  cv.bitwise_not(ff, ff);
+  cv.bitwise_or(bin, ff, bin);
+  // original soft alpha ko is region ke andar rakho, bahar 0
+  const out = new Uint8ClampedArray(W * H);
+  const bd = bin.data;
+  for (let i = 0; i < W * H; i++) out[i] = bd[i] ? Math.max(alpha[i], 200) : alpha[i];
+  m.delete(); bin.delete(); kern.delete(); ff.delete(); mask2.delete();
+  return out;
+}
+
+/** temporal memory: recent frames ka weighted max — dropout bhar deta hai */
+class AlphaMemory {
+  constructor(W, H, depth) {
+    this.W = W; this.H = H; this.depth = depth;
+    this.buf = new Uint8ClampedArray(W * H);
+    this.n = 0;
+  }
+  push(cur, decay) {
+    const b = this.buf, N = this.W * this.H;
+    if (this.n === 0) { b.set(cur); this.n = 1; return b; }
+    for (let i = 0; i < N; i++) {
+      const fade = b[i] * decay;              // purani memory dheere fade
+      b[i] = cur[i] > fade ? cur[i] : fade;   // max(current, faded memory)
+    }
+    this.n++;
+    return b;
+  }
+}
+
 /* ================= EXACT-TIMING ENCODER =================
    BUG: MediaRecorder wall-clock time record karta hai. 6s video agar
    process hone me 3 min lagi to output bhi 3 min ka banta hai (aur
@@ -1899,9 +1986,16 @@ $('#runVideo').onclick = async () => {
     jobStart(`🎬 Video background remove — ${vidFile.name}`, total);
     let prevAlpha = null, lastRaw = null, alphaBuf = null, personRegion = null;
     let aiFrames = 0;
+    const rescueSkin = $('#vidSkinRescue')?.checked ?? true;
+    const holeFill   = $('#vidHoleFill')?.checked ?? true;
+    const holeK      = 7;
+    const memDepth   = +($('#vidMemory')?.value || 3);
+    const memDecay   = memDepth <= 1 ? 0 : 1 - (1 / memDepth);
+    const mem        = memDepth > 1 ? new AlphaMemory(W, H, memDepth) : null;
     const modelSize = RMBG_SIZE;                          // fixed by model
     const regionEvery = Math.max(1, +($('#vidRegion')?.value || 8));
-    log(`⚙ AI 1024px (model-fixed) · mask har ${every} frame · person-check har ${regionEvery} frame`);
+    log(`⚙ AI 1024px · mask har ${every}f · person-check har ${regionEvery}f · ` +
+        `skin-rescue ${rescueSkin?'ON':'off'} · hole-fill ${holeFill?'ON':'off'} · memory ${memDepth}f`);
     const t0 = performance.now();
 
     // playback mode: seeking se 5-10x fast
@@ -1944,13 +2038,29 @@ $('#runVideo').onclick = async () => {
             keepAccessories: $('#keepAcc').checked, keepBag: $('#keepBag').checked });
           if (pr) personRegion = await dilateRegion(pr, W, H, +($('#grow')?.value || 6));
         }
-        // region ke bahar ka alpha kill (bed/mirror/objects hatao)
+        /* SOFT region filter + SKIN RESCUE.
+           Pehle hard kill tha -> segformer ne face miss kiya to face gayab.
+           Ab: region ke bahar attenuate karte hain, par SKIN pixels aur
+           strong-RMBG pixels hamesha bachte hain.                        */
         if (personMode && personRegion) {
-          for (let i = 0; i < W * H; i++) if (personRegion[i] < 128) lastRaw[i] = 0;
+          const skin = rescueSkin ? frameSkinMask(grab, W, H) : null;
+          for (let i = 0; i < W * H; i++) {
+            if (personRegion[i] >= 128) continue;           // region ke andar — rakho
+            const a = lastRaw[i];
+            if (a < 30) { lastRaw[i] = 0; continue; }        // waise bhi background
+            if (skin && skin[i]) continue;                   // SKIN — kabhi mat kaato
+            if (a > 200) { lastRaw[i] = a * 0.85; continue; } // RMBG bahut confident — rakho
+            lastRaw[i] = a * 0.25;                           // warna dabao (object)
+          }
+        }
+        // interior holes bharo (face/kapdon ke chhed)
+        if (holeFill) {
+          try { lastRaw = fillHoles(lastRaw, W, H, holeK); } catch (e) {}
         }
       }
-      // temporal smoothing
-      const curAlpha = blendAlpha(prevAlpha, lastRaw, W, H, smooth);
+      /* temporal: memory (dropout bharta hai) + smoothing (flicker hatata hai) */
+      const remembered = mem ? mem.push(lastRaw, memDecay) : lastRaw;
+      const curAlpha = blendAlpha(prevAlpha, remembered, W, H, smooth);
       prevAlpha = curAlpha;
 
       // compose
@@ -2334,4 +2444,4 @@ addEventListener('beforeunload', () => { try { ocrWorker?.terminate(); } catch(e
 /* warm up in background so first real run is fast */
 addEventListener('load', () => { cvReady().then(() => log('✅ OpenCV engine ready', 'ok')).catch(() => {}); });
 log('👋 Ready. Images drop karo — sab kuch automatically ho jayega.');
-log('🏷 build v15.0-allframes · memory-safe · MAX_PIXELS=' + (MAX_PIXELS/1e6).toFixed(0) + 'MP · deviceMemory=' + (navigator.deviceMemory||'?') + 'GB', 'ok');
+log('🏷 build v16.0-facesafe · memory-safe · MAX_PIXELS=' + (MAX_PIXELS/1e6).toFixed(0) + 'MP · deviceMemory=' + (navigator.deviceMemory||'?') + 'GB', 'ok');
