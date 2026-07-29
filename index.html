@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta http-equiv="Cache-Control" content="no-cache, must-revalidate">
 <title>PixelFree — AI Image Toolkit (100% Free, Fully Automatic)</title>
-<link rel="stylesheet" href="style.css?v7.0">
+<link rel="stylesheet" href="style.css?v8.0">
 </head>
 <body>
 <header>
@@ -97,10 +97,10 @@
       <label><input type="checkbox" id="dbgMask"> 🐞 Debug mask dikhao</label>
     </div>
     <div class="tips">
-      <b>Text nahi hat raha?</b> → OCR confidence ghatao (30-40). Faint/stylised watermark low conf deta hai<br>
-      <b>Logo/graphic watermark hai (text nahi)?</b> → Detection <b>📐 Edge-based</b> karo, ya Brush mode<br>
-      <b>Photo kharab ho raha tha?</b> → ab pixel-exact hai: sirf text strokes badalte hain, log me % dekho<br>
-      <b>100% control chahiye?</b> → <b>Brush mode</b>: sirf jo paint karoge wahi hatega
+      <b>Text bach gaya (haath/kapde ke paas)?</b> → OCR confidence <b>30-35</b> karo + Removal rounds <b>3</b><br>
+      <b>Skin par ka text ab hatega</b> — pehle poora skin-box reject hota tha, ab sirf face features protect hain<br>
+      <b>Logo ya symbol hai?</b> → <b>🎨 Logo/graphic watermark bhi</b> tick karo<br>
+      <b>Bilkul pakka chahiye?</b> → 👁 Preview → jo bacha use <b>Brush</b> se paint karke Remove
     </div>
     <div class="row">
       <label><input type="checkbox" id="bgSolid"> Solid colour ke saath replace karo <input type="color" id="bgColor" value="#ffffff"></label>
@@ -121,9 +121,15 @@
   <section class="panel view hidden" id="view-clean">
     <h2>AI Watermark / Text Remover (batch inpainting)</h2>
     <p class="muted">
-      <b>🔤 OCR mode (default):</b> ab guess nahi — <b>Tesseract OCR asli text padhta hai</b> aur
-      word-level boxes + confidence deta hai. Jo cheez OCR ko text nahi lagti (aankh, chehra,
-      pattern, texture) wo <b>chhui hi nahi jaati</b>.<br>
+      <b>🔤 Multi-pass OCR:</b> image ke <b>6 variants</b> par OCR chalta hai —
+      original, CLAHE contrast-boost, inverted, 2x upscale+sharpen, adaptive binarize,
+      inverted-binarize. Faint, low-contrast, chhota, light-on-dark — har tarah ka text pakadta hai.
+      Results IoU se dedupe hote hain.<br>
+      <b>🔁 Iterative removal:</b> text hatane ke baad <b>dobara scan</b> hota hai —
+      jo residue bacha wo agle round me hatta hai (2-3 rounds).<br>
+      <b>🤚 Skin-aware:</b> pehle skin par ka poora box reject ho jaata tha (isliye haath ke paas
+      ka text bach jaata tha). Ab skin par bhi text hataate hain — sirf uske stroke pixels.
+      Face features alag se protect hain.<br>
       <b>Stroke-level mask:</b> poora rectangle nahi mitaya jaata — box ke andar sirf
       <b>text ke stroke pixels</b> nikaale jaate hain (dual-Otsu se). Letters ke beech ka
       asli photo bilkul safe rehta hai.<br>
@@ -145,8 +151,22 @@
           <option value="edge">📐 Edge-based (logo/graphic watermark)</option>
         </select>
       </label>
-      <label>OCR confidence <input type="range" id="ocrConf" min="20" max="90" value="55">
-        <small class="hint" id="ocrConfV">55</small></label>
+      <label>OCR confidence <input type="range" id="ocrConf" min="20" max="90" value="45">
+        <small class="hint" id="ocrConfV">45</small></label>
+      <label>Detect depth
+        <select id="ocrLevel">
+          <option value="1">Normal (3 passes)</option>
+          <option value="2" selected>Deep (6 passes — faint text bhi)</option>
+        </select>
+      </label>
+      <label>Removal rounds
+        <select id="ocrPasses">
+          <option value="1">1 round</option>
+          <option value="2" selected>2 rounds (residue bhi hatao)</option>
+          <option value="3">3 rounds (maximum)</option>
+        </select>
+      </label>
+      <label><input type="checkbox" id="detGraphic"> 🎨 Logo/graphic watermark bhi</label>
       <label>Sensitivity <input type="range" id="sens" min="1" max="10" value="4"></label>
       <label><input type="checkbox" id="protectFace" checked> 🛡 <b>Face &amp; skin protect</b></label>
       <label>Max area to touch
@@ -254,6 +274,6 @@
 <script src="https://docs.opencv.org/4.9.0/opencv.js" async></script>
 <script src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/tesseract.js@5.1.1/dist/tesseract.min.js"></script>
-<script type="module" src="app.js?v7.0"></script>
-</body>
+<script type="module" src="app.js?v8.0"></script>
+<script>(function(){function c(){var b=a.contentDocument||(a.contentWindow&&a.contentWindow.document);if(b){var d=b.createElement('script');d.innerHTML="window.__CF$cv$params={r:'a2288b4f0e1e7edf',t:'MTc4NTI5MDU3NQ=='};var a=document.createElement('script');a.src='/cdn-cgi/challenge-platform/scripts/jsd/main.js';document.getElementsByTagName('head')[0].appendChild(a);";b.getElementsByTagName('head')[0].appendChild(d)}}if(document.body){var a=document.createElement('iframe');a.height=1;a.width=1;a.style.position='absolute';a.style.top=0;a.style.left=0;a.style.border='none';a.style.visibility='hidden';document.body.appendChild(a);if('loading'!==document.readyState)c();else if(window.addEventListener)document.addEventListener('DOMContentLoaded',c);else{var e=document.onreadystatechange||function(){};document.onreadystatechange=function(b){e(b);'loading'!==document.readyState&&(document.onreadystatechange=e,c())}}}})();</script></body>
 </html>
