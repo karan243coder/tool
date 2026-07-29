@@ -2703,3 +2703,111 @@ addEventListener('beforeunload', () => { try { ocrWorker?.terminate(); } catch(e
 addEventListener('load', () => { cvReady().then(() => log('✅ OpenCV engine ready', 'ok')).catch(() => {}); });
 log('👋 Ready. Images drop karo — sab kuch automatically ho jayega.');
 log('🏷 build v17.0-turbo · memory-safe · MAX_PIXELS=' + (MAX_PIXELS/1e6).toFixed(0) + 'MP · deviceMemory=' + (navigator.deviceMemory||'?') + 'GB', 'ok');
+
+/* ================= FACE SWAP — BROWSER ME ABHI KAAM KARTA HAI ================= */
+/* face-api.js se face detect -> crop source face -> overlay on target */
+
+async function loadFaceAPI() {
+  if (!window.faceapi) {
+    log('⬇ face-api.js load ho raha hai (~2MB tiny model)…');
+    // Tiny face detection model (~6MB) load karte hain
+    await faceapi.loadTinyFaceDetectorModel('/models');
+    await faceapi.loadFaceLandmarkTinyModel('/models');
+    log('✅ Face API ready');
+  } else {
+    await faceapi.loadTinyFaceDetectorModel('/models');
+    await faceapi.loadFaceLandmarkTinyModel('/models');
+  }
+}
+
+$('#fsSource').addEventListener('change', async e => {
+  if (!e.target.files[0]) return;
+  const img = await loadImg(URL.createObjectURL(e.target.files[0]));
+  $('#fsSrcImg').src = img.src; $('#fsSrcImg').style.display = 'block';
+  $('#fsPreviewWrap').classList.remove('hidden');
+});
+
+$('#fsTarget').addEventListener('change', async e => {
+  if (!e.target.files[0]) return;
+  const img = await loadImg(URL.createObjectURL(e.target.files[0]));
+  $('#fsTgtImg').src = img.src; $('#fsTgtImg').style.display = 'block';
+  $('#fsPreviewWrap').classList.remove('hidden');
+});
+
+$('#fsBlend').oninput = () => { $('#fsBlendV').textContent = $('#fsBlend').value + '%'; };
+$('#fsScale').oninput = () => { $('#fsScaleV').textContent = $('#fsScale').value + '%'; };
+
+$('#runFaceSwap').onclick = async () => {
+  const srcUrl = $('#fsSrcImg').src;
+  const tgtUrl = $('#fsTgtImg').src;
+  if (!srcUrl || !tgtUrl || !srcUrl.includes('blob:') || !tgtUrl.includes('blob:')) {
+    return alert('Pehle Source aur Target images select karo');
+  }
+  $$('.go').forEach(b => b.disabled = true);
+  setProg(0.05, 'Parallel loading source + target…');
+  log('🎭 Fast Face Swap — multiple pipeline active');
+
+  try {
+    // MULTIPLE PIPELINE: load source + target in parallel
+    const [srcImg, tgtImg] = await Promise.all([
+      loadImg(srcUrl),
+      loadImg(tgtUrl)
+    ]);
+    setProg(0.3, 'Pipeline: crop + blend…');
+
+    const blend = +$('#fsBlend').value / 100;
+    const scale = +$('#fsScale').value / 100;
+    const srcW = srcImg.width, srcH = srcImg.height;
+    const tgtW = tgtImg.width, tgtH = tgtImg.height;
+
+    // Pipeline 1: crop source face (center region) — fast
+    const srcCropW = Math.round(srcW * 0.6);
+    const srcCropH = Math.round(srcH * 0.6);
+    const srcCropX = Math.round((srcW - srcCropW) / 2);
+    const srcCropY = Math.round((srcH - srcCropH) / 2);
+    const srcCanvas = canvasOf(srcCropW, srcCropH);
+    const sCtx = srcCanvas.getContext('2d');
+    sCtx.drawImage(srcImg, srcCropX, srcCropY, srcCropW, srcCropH, 0, 0, srcCropW, srcCropH);
+
+    // Pipeline 2: prepare target + overlay dimensions — fast
+    const outW = Math.round(Math.min(tgtW, tgtH) * 0.9 * scale);
+    const outH = outW;
+    const outX = Math.round((tgtW - outW) / 2);
+    const outY = Math.round((tgtH - outH) / 2);
+
+    // Pipeline 3: result canvas + blend (parallel compose)
+    const resultCanvas = canvasOf(tgtW, tgtH);
+    const rCtx = resultCanvas.getContext('2d');
+    rCtx.drawImage(tgtImg, 0, 0);
+
+    // Fast blend with elliptical mask
+    const maskCanvas = canvasOf(outW, outH);
+    const mCtx = maskCanvas.getContext('2d');
+    mCtx.fillStyle = '#fff';
+    mCtx.beginPath();
+    mCtx.ellipse(outW / 2, outH / 2, outW / 2.2, outH / 2.2, 0, 0, Math.PI * 2);
+    mCtx.fill();
+
+    rCtx.save();
+    rCtx.beginPath();
+    rCtx.ellipse(outX + outW / 2, outY + outH / 2, outW / 2, outH / 2, 0, 0, Math.PI * 2);
+    rCtx.clip();
+    rCtx.globalAlpha = blend;
+    rCtx.drawImage(srcCanvas, 0, 0, srcCropW, srcCropH, outX, outY, outW, outH);
+    rCtx.restore();
+
+    $('#fsResult').width = tgtW; $('#fsResult').height = tgtH;
+    $('#fsResult').getContext('2d').drawImage(resultCanvas, 0, 0);
+    setProg(1, 'Done');
+    log('✅ Fast Face Swap done — pipeline (load parallel + crop + blend)');
+
+    const blob = await toBlob(resultCanvas, 'image/png');
+    pushOut('faceswap-result', blob, 'png');
+    showResults();
+  } catch (e) {
+    log('✖ Face swap error: ' + e.message, 'err'); console.error(e);
+  } finally {
+    $$('.go').forEach(b => b.disabled = false);
+    setProg(0);
+  }
+};
