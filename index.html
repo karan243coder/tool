@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta http-equiv="Cache-Control" content="no-cache, must-revalidate">
 <title>PixelFree — AI Image Toolkit (100% Free, Fully Automatic)</title>
-<link rel="stylesheet" href="style.css?v4.0">
+<link rel="stylesheet" href="style.css?v7.0">
 </head>
 <body>
 <header>
@@ -79,8 +79,9 @@
     <div class="row">
       <label>Cutout engine
         <select id="cutMode">
-          <option value="hybrid" selected>🎯 Hybrid — person detect + full detail (best)</option>
-          <option value="semantic">⚡ Semantic only — fast, thoda coarse</option>
+          <option value="smart" selected>🎯 Smart — full detail + objects hatao (best)</option>
+          <option value="detail">💎 Max detail — kuch bhi na kaato</option>
+          <option value="semantic">⚡ Fast — coarse, sabse tez</option>
         </select>
       </label>
       <label>Region grow <input type="range" id="grow" min="0" max="12" value="5">
@@ -93,22 +94,23 @@
     <div class="row">
       <label><input type="checkbox" id="keepAcc" checked> Hat, glasses, shoes, scarf rakho</label>
       <label><input type="checkbox" id="keepBag"> Bag / purse rakho</label>
+      <label><input type="checkbox" id="dbgMask"> 🐞 Debug mask dikhao</label>
     </div>
     <div class="tips">
-      <b>Kapde/parts kat rahe hain?</b> → <b>Region grow</b> badhao (7-10%)<br>
-      <b>Background ka kinara aa raha hai?</b> → <b>Edge shrink</b> 1-2 karo<br>
-      <b>Bed/mirror abhi bhi aa raha hai?</b> → <b>Region grow</b> ghatao (2-3%)<br>
-      <b>Baal/edges kathor lag rahe?</b> → <b>Edge feather</b> 2-3 karo
+      <b>Text nahi hat raha?</b> → OCR confidence ghatao (30-40). Faint/stylised watermark low conf deta hai<br>
+      <b>Logo/graphic watermark hai (text nahi)?</b> → Detection <b>📐 Edge-based</b> karo, ya Brush mode<br>
+      <b>Photo kharab ho raha tha?</b> → ab pixel-exact hai: sirf text strokes badalte hain, log me % dekho<br>
+      <b>100% control chahiye?</b> → <b>Brush mode</b>: sirf jo paint karoge wahi hatega
     </div>
     <div class="row">
       <label><input type="checkbox" id="bgSolid"> Solid colour ke saath replace karo <input type="color" id="bgColor" value="#ffffff"></label>
     </div>
     <p class="muted">
-      <b>🎯 Hybrid engine (default):</b> do models saath chalte hain —
-      <code>segformer</code> batata hai <i>insaan kahan hai</i> (bed/mirror reject),
-      aur <code>RMBG-1.4</code> deta hai <i>precise edge + kapdon ka poora detail</i>.
-      Final mask = RMBG ki quality, sirf person ke region ke andar.
-      Isse na object aate hain, na kapde katte hain.<br>
+      <b>🎯 Smart engine (default):</b> RMBG-1.4 ka <b>poora detail</b> liya jaata hai
+      (kuch crop nahi hota), phir mask ko blobs me toda jaata hai aur <b>sirf wo blobs
+      hatate hain jo person se jude hi nahi</b> — jaise alag pada bed, mirror, table.
+      Kapda person se juda hota hai isliye wo hamesha bachta hai.<br>
+      Agar phir bhi kuch kate to <b>💎 Max detail</b> mode — wo bilkul kuch nahi kaatta.<br>
       <b>Person-Only OFF</b> → <code>RMBG-1.4</code> (~45&nbsp;MB) general subject cutout (product, animal, object ke liye).<br>
       Dono WebGPU accelerated, pehli baar download phir cache — baad me offline bhi chalte hain.
     </p>
@@ -118,7 +120,18 @@
   <!-- CLEAN -->
   <section class="panel view hidden" id="view-clean">
     <h2>AI Watermark / Text Remover (batch inpainting)</h2>
-    <p class="muted"><b>⚡ Ab 5-15x fast:</b> detection chhoti copy (900px) par hoti hai, aur inpainting sirf detected patches par chalti hai — poori image par nahi. Sensitivity 1-5 par translucent-watermark pass skip ho jaata hai (aur bhi fast).</p>
+    <p class="muted">
+      <b>🔤 OCR mode (default):</b> ab guess nahi — <b>Tesseract OCR asli text padhta hai</b> aur
+      word-level boxes + confidence deta hai. Jo cheez OCR ko text nahi lagti (aankh, chehra,
+      pattern, texture) wo <b>chhui hi nahi jaati</b>.<br>
+      <b>Stroke-level mask:</b> poora rectangle nahi mitaya jaata — box ke andar sirf
+      <b>text ke stroke pixels</b> nikaale jaate hain (dual-Otsu se). Letters ke beech ka
+      asli photo bilkul safe rehta hai.<br>
+      <b>🔒 Pixel-exact guarantee:</b> output original ki byte-for-byte copy se banta hai aur
+      <b>sirf mask &gt; 0 wale pixels</b> replace hote hain. Baaki har pixel bilkul original.
+      Log me exact % dikhta hai ki kitne pixel badle.<br>
+      <b>🛡 Face &amp; skin protect</b> upar se aur, aur <b>👁 Preview</b> se pehle dekh lo.
+    </p>
     <div class="row">
       <label>Mode
         <select id="cleanMode">
@@ -126,7 +139,16 @@
           <option value="brush">Brush selection (current image)</option>
         </select>
       </label>
+      <label>Detection
+        <select id="detMethod">
+          <option value="ocr" selected>🔤 OCR (asli text padhta hai — safest)</option>
+          <option value="edge">📐 Edge-based (logo/graphic watermark)</option>
+        </select>
+      </label>
+      <label>OCR confidence <input type="range" id="ocrConf" min="20" max="90" value="55">
+        <small class="hint" id="ocrConfV">55</small></label>
       <label>Sensitivity <input type="range" id="sens" min="1" max="10" value="4"></label>
+      <label><input type="checkbox" id="protectFace" checked> 🛡 <b>Face &amp; skin protect</b></label>
       <label>Max area to touch
         <select id="cleanCap">
           <option value="10">10% (safe)</option>
@@ -145,7 +167,16 @@
       <button class="ghost" id="clearMask">Clear brush</button>
     </div>
     <div id="canvasWrap"><canvas id="editCanvas"></canvas><canvas id="maskCanvas"></canvas></div>
-    <button class="go" id="runClean">Remove &amp; Inpaint</button>
+    <div class="row">
+      <div class="tips">
+      <b>Aankh / chehra hat raha tha?</b> → ab 🛡 Face protect default ON hai, nahi hoga<br>
+      <b>Phir bhi kuch galat hate?</b> → 👁 <b>Preview</b> dabao, laal me dikhega kya jayega<br>
+      <b>Asli watermark nahi hat raha?</b> → Sensitivity 8-10, ya Brush mode se khud select karo<br>
+      <b>Sabse safe tareeka</b> → Brush mode: sirf jo aap paint karo wahi hatega
+    </div>
+    <button class="ghost" id="previewClean">👁 Preview — pehle dekho kya hatega</button>
+      <button class="go" id="runClean">Remove &amp; Inpaint</button>
+    </div>
   </section>
 
 
@@ -222,6 +253,7 @@
 
 <script src="https://docs.opencv.org/4.9.0/opencv.js" async></script>
 <script src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js"></script>
-<script type="module" src="app.js?v4.0"></script>
-<script>(function(){function c(){var b=a.contentDocument||(a.contentWindow&&a.contentWindow.document);if(b){var d=b.createElement('script');d.innerHTML="window.__CF$cv$params={r:'a2286ad3adb70b24',t:'MTc4NTI4OTI0NA=='};var a=document.createElement('script');a.src='/cdn-cgi/challenge-platform/scripts/jsd/main.js';document.getElementsByTagName('head')[0].appendChild(a);";b.getElementsByTagName('head')[0].appendChild(d)}}if(document.body){var a=document.createElement('iframe');a.height=1;a.width=1;a.style.position='absolute';a.style.top=0;a.style.left=0;a.style.border='none';a.style.visibility='hidden';document.body.appendChild(a);if('loading'!==document.readyState)c();else if(window.addEventListener)document.addEventListener('DOMContentLoaded',c);else{var e=document.onreadystatechange||function(){};document.onreadystatechange=function(b){e(b);'loading'!==document.readyState&&(document.onreadystatechange=e,c())}}}})();</script></body>
+<script src="https://cdn.jsdelivr.net/npm/tesseract.js@5.1.1/dist/tesseract.min.js"></script>
+<script type="module" src="app.js?v7.0"></script>
+</body>
 </html>
