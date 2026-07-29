@@ -47,3 +47,11 @@ select,input[type=number]{background:#0d1117;border:1px solid #30363d;color:#e6e
 #links a{color:#58a6ff;font-size:13px;word-break:break-all}
 #links p{background:#0d1117;padding:10px;border-radius:8px;font-size:13px}
 footer{text-align:center;color:#8b949e;font-size:12px;padding:20px}
+
+.opt.hero{grid-column:1/-1;border-color:#3fb950;background:#0f1f14;font-size:14px}
+.opt.hero b{color:#e6edf3}
+
+#vidDrop{border:2px dashed #30363d;border-radius:12px;padding:26px;text-align:center;cursor:pointer;color:#8b949e;margin-bottom:12px}
+#vidDrop .big{font-size:30px}
+#vidDrop.hot{border-color:#3fb950;background:#12261a}
+#vidOut{margin-top:14px}
